@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Analytics · TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .kpi-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); padding: 16px; }
+    .kpi-value { font-size: 32px; font-weight: 800; color: var(--primary); margin: 4px 0; }
+    .kpi-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .kpi-card.alert { background: #fef2f2; border-color: #fecaca; }
+    .kpi-card.alert .kpi-value { color: #dc2626; }
+    .cohort-builder {
+      background: var(--bg-card-2); padding: 16px; border-radius: var(--r-md);
+      margin-bottom: 16px; border: 1px solid var(--border);
+    }
+    .cohort-builder label { font-size: 13px; color: var(--text-secondary); display: block; margin-bottom: 4px; }
+    .cohort-builder input, .cohort-builder select {
+      width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg-base); color: var(--text-primary); margin-bottom: 8px;
+    }
+    .cohort-list { background: var(--bg-card); padding: 8px; border-radius: var(--r-md); border: 1px solid var(--border); }
+    .cohort-row { padding: 10px; border-bottom: 1px solid var(--border); }
+    .cohort-row:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-host"></div>
+  <div id="modal-host"></div>
+  <main class="content">
+    <div class="topbar">
+      <h1>📊 Clinic Analytics</h1>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost" onclick="loadAll()">🔄 Refresh</button>
+      </div>
+    </div>
+
+    <div class="kpi-grid" id="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Loading…</div></div>
+    </div>
+
+    <div class="cohort-builder">
+      <h3 style="margin:0 0 12px;">🔍 Cohort Finder</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;">
+        <div>
+          <label>Condition</label>
+          <input type="text" id="co-condition" placeholder="e.g. diabetes" />
+        </div>
+        <div>
+          <label>Min Age</label>
+          <input type="number" id="co-min-age" placeholder="e.g. 40" />
+        </div>
+        <div>
+          <label>Max Age</label>
+          <input type="number" id="co-max-age" placeholder="e.g. 70" />
+        </div>
+        <div>
+          <label>HbA1c Above</label>
+          <input type="number" id="co-hba1c" step="0.1" placeholder="e.g. 8" />
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="runCohort()">Find Cohort</button>
+      <div id="cohort-result" style="margin-top:12px;"></div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('analytics');
+      window.loadAll = loadAll;
+      window.runCohort = runCohort;
+      loadAll();
+    })();
+
+    async function loadAll() {
+      try {
+        const r = await fetch('/api/analytics/clinic-overview');
+        const j = await r.json();
+        renderKPIs(j);
+      } catch (e) {
+        TatvaCare.toast('Failed: ' + e.message, 'error');
+      }
+    }
+
+    function renderKPIs(j) {
+      const grid = document.getElementById('kpi-grid');
+      const cards = [
+        { v: j.total_patients, l: 'Total Patients' },
+        { v: j.avg_age || '—', l: 'Avg Age' },
+        { v: j.diabetic_count, l: 'Diabetic' },
+        { v: j.hypertensive_count, l: 'Hypertensive' },
+        { v: j.prescription_count, l: 'Total Rx' },
+        { v: j.rx_last_30d, l: 'Rx last 30d' },
+        { v: j.reminders_active, l: 'Active Reminders' },
+        { v: j.tele_sessions_scheduled, l: 'Tele Scheduled' },
+      ];
+      grid.innerHTML = cards.map(c =>
+        `<div class="kpi-card"><div class="kpi-value">${c.v}</div><div class="kpi-label">${c.l}</div></div>`
+      ).join('') + (j.uncontrolled_dm_count > 0
+        ? `<div class="kpi-card alert"><div class="kpi-value">${j.uncontrolled_dm_count}</div><div class="kpi-label">⚠️ Uncontrolled DM (HbA1c ≥ 8)</div></div>`
+        : '');
+    }
+
+    async function runCohort() {
+      const params = new URLSearchParams();
+      const cond = document.getElementById('co-condition').value;
+      const minA = document.getElementById('co-min-age').value;
+      const maxA = document.getElementById('co-max-age').value;
+      const hba1c = document.getElementById('co-hba1c').value;
+      if (cond) params.set('condition', cond);
+      if (minA) params.set('min_age', minA);
+      if (maxA) params.set('max_age', maxA);
+      if (hba1c) params.set('hba1c_above', hba1c);
+      const r = await fetch('/api/analytics/cohort?' + params);
+      const j = await r.json();
+      const out = document.getElementById('cohort-result');
+      if (!j.patients.length) {
+        out.innerHTML = '<div style="color:var(--text-secondary);">कोई मरीज़ नहीं मिला / No matching patients</div>';
+        return;
+      }
+      out.innerHTML = `
+        <div class="cohort-list">
+          <div style="padding:8px;font-weight:600;">${j.cohort_size} मरीज़ मिले</div>
+          ${j.patients.map(p => `
+            <div class="cohort-row">
+              <strong>${escapeHtml(p.full_name)}</strong> · ${p.age || '?'} yrs · ${p.gender || '?'}
+              <div style="font-size:12px;color:var(--text-secondary);">📞 ${escapeHtml(p.phone || '')} · समस्याएँ: ${p.problems.map(escapeHtml).join(', ')}</div>
+            </div>
+          `).join('')}
+        </div>`;
+    }
+
+    function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  </script>
+</body>
+</html>

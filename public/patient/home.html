@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="theme-color" content="#6366f1" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <title>मेरा स्वास्थ्य · तत्वकेयर</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    body { background: #f9fafb; }
+    .patient-header {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: white; padding: 24px 20px 80px;
+      border-radius: 0 0 24px 24px;
+      position: relative;
+    }
+    .patient-header h1 { margin: 0 0 4px; font-size: 22px; }
+    .patient-header .sub { opacity: 0.85; font-size: 14px; }
+    .patient-header .logout {
+      position: absolute; top: 24px; right: 20px;
+      background: rgba(255,255,255,0.15); color: white;
+      border: none; padding: 6px 14px; border-radius: 16px;
+      font-size: 12px; cursor: pointer;
+    }
+    .patient-content { padding: 0 16px; margin-top: -60px; }
+    .quick-actions {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+      margin-bottom: 16px;
+    }
+    .qa-card {
+      background: white; border-radius: 12px; padding: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+      cursor: pointer; transition: transform .15s;
+    }
+    .qa-card:active { transform: scale(0.97); }
+    .qa-icon { font-size: 28px; margin-bottom: 4px; }
+    .qa-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+    .qa-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+    .section-card {
+      background: white; border-radius: 12px; padding: 16px; margin-bottom: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    .section-title { font-size: 15px; font-weight: 700; margin-bottom: 12px; }
+    .vital-card {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .vital-card:last-child { border-bottom: none; }
+    .vital-name { font-size: 14px; color: var(--text-secondary); }
+    .vital-value { font-size: 20px; font-weight: 700; margin-left: auto; }
+    .vital-flag { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+    .vital-flag.high { background: #fee2e2; color: #991b1b; }
+    .vital-flag.low { background: #fef3c7; color: #92400e; }
+    .rx-pill {
+      display: inline-block; padding: 8px 12px;
+      background: #f3f4f6; border-radius: 8px;
+      font-size: 13px; margin: 4px 4px 4px 0;
+    }
+    .bottom-nav {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: white; border-top: 1px solid var(--border);
+      display: flex; justify-content: space-around;
+      padding: 8px 0 12px;
+    }
+    .bnav-item { text-align: center; font-size: 11px; color: var(--text-secondary); cursor: pointer; padding: 4px 8px; }
+    .bnav-item.active { color: var(--primary); }
+    .bnav-icon { font-size: 22px; display: block; margin-bottom: 2px; }
+    .bnav-spacer { height: 70px; }
+  </style>
+</head>
+<body>
+  <div class="patient-header">
+    <button class="logout" id="logout-btn">बाहर</button>
+    <h1 id="greeting">नमस्ते</h1>
+    <div class="sub" id="sub-greeting">आपका स्वास्थ्य, आपकी उँगलियों पर</div>
+  </div>
+  <div class="patient-content">
+    <div class="quick-actions">
+      <div class="qa-card" onclick="location.href='/patient/log-vitals'">
+        <div class="qa-icon">📊</div>
+        <div class="qa-label">रीडिंग दर्ज करें</div>
+        <div class="qa-sub">ब्लड प्रेशर / शुगर</div>
+      </div>
+      <div class="qa-card" onclick="showSection('rx')">
+        <div class="qa-icon">💊</div>
+        <div class="qa-label">मेरी दवाइयाँ</div>
+        <div class="qa-sub">चालू नुस्खे</div>
+      </div>
+      <div class="qa-card" onclick="showSection('reminders')">
+        <div class="qa-icon">⏰</div>
+        <div class="qa-label">रिमाइंडर</div>
+        <div class="qa-sub">दवाई / अपॉइंटमेंट</div>
+      </div>
+      <div class="qa-card" onclick="showSection('appts')">
+        <div class="qa-icon">📅</div>
+        <div class="qa-label">अपॉइंटमेंट</div>
+        <div class="qa-sub">टेलीकंसल्ट / क्लिनिक</div>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">📈 हाल की रीडिंग्स</div>
+      <div id="vitals-list">लोड हो रहा है...</div>
+    </div>
+
+    <div class="section-card" id="rx-section" style="display:none;">
+      <div class="section-title">💊 मेरी दवाइयाँ</div>
+      <div id="rx-list">कोई नुस्खा नहीं</div>
+    </div>
+
+    <div class="section-card" id="appts-section" style="display:none;">
+      <div class="section-title">📅 अपॉइंटमेंट</div>
+      <div id="appts-list">कोई अपॉइंटमेंट नहीं</div>
+    </div>
+
+    <div class="section-card" id="reminders-section" style="display:none;">
+      <div class="section-title">⏰ रिमाइंडर</div>
+      <div id="reminders-list">कोई रिमाइंडर नहीं</div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-title">🚨 एलर्जी</div>
+      <div id="allergies-list">कोई ज्ञात एलर्जी नहीं</div>
+    </div>
+
+    <div class="bnav-spacer"></div>
+  </div>
+
+  <nav class="bottom-nav">
+    <div class="bnav-item active" onclick="location.href='/patient/home'">
+      <span class="bnav-icon">🏠</span>होम
+    </div>
+    <div class="bnav-item" onclick="location.href='/patient/log-vitals'">
+      <span class="bnav-icon">📊</span>रीडिंग
+    </div>
+    <div class="bnav-item" onclick="location.href='/patient/telemedicine'">
+      <span class="bnav-icon">📞</span>टेलीमेडिसिन
+    </div>
+    <div class="bnav-item" onclick="logout()">
+      <span class="bnav-icon">🚪</span>बाहर
+    </div>
+  </nav>
+
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    let me = null;
+    async function load() {
+      const r = await fetch('/api/patient/auth/me');
+      if (!r.ok) { window.location.href = '/patient'; return; }
+      const j = await r.json();
+      me = j.patient;
+      document.getElementById('greeting').textContent = 'नमस्ते, ' + (me.full_name || '').split(' ')[0];
+      document.getElementById('sub-greeting').textContent = 'फ़ोन: ' + (me.phone || '');
+      // Load full chart
+      const r2 = await fetch('/api/patient/me');
+      const j2 = await r2.json();
+      render(j2);
+    }
+    function render({ patient, vitals, prescriptions, allergies, reminders, appointments }) {
+      // Recent vitals (latest 5)
+      const vl = document.getElementById('vitals-list');
+      const recent = (vitals || []).slice(0, 5);
+      if (!recent.length) vl.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई हाल की रीडिंग नहीं — <a href="/patient/log-vitals">अभी दर्ज करें</a></div>';
+      else vl.innerHTML = recent.map(v => {
+        const flagClass = v.flagged === 'high' ? 'high' : (v.flagged === 'low' ? 'low' : '');
+        return `<div class="vital-card">
+          <div><div class="vital-name">${escapeHtml(metricLabel(v.metric))}</div>
+            <div style="font-size:11px;color:var(--text-secondary);">${formatDate(v.recorded_at)}</div></div>
+          <div class="vital-value">${v.value}${escapeHtml(v.unit || '')}</div>
+          ${v.flagged ? `<span class="vital-flag ${flagClass}">${v.flagged === 'high' ? 'ऊँचा' : 'कम'}</span>` : ''}
+        </div>`;
+      }).join('');
+      // Rx
+      const rl = document.getElementById('rx-list');
+      if (!prescriptions?.length) rl.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई चालू नुस्खा नहीं</div>';
+      else rl.innerHTML = prescriptions.slice(0, 5).map(rx =>
+        `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
+          <div style="font-weight:600;font-size:14px;">${escapeHtml(rx.diagnosis_label || 'निदान')}</div>
+          <div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(rx.advice || '')}</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-secondary);">${formatDate(rx.created_at)} · फॉलो-अप: ${rx.followup_in_days || '—'} दिन</div>
+        </div>`).join('');
+      // Reminders
+      const rm = document.getElementById('reminders-list');
+      if (!reminders?.length) rm.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई रिमाइंडर नहीं</div>';
+      else rm.innerHTML = reminders.slice(0, 5).map(r =>
+        `<div style="padding:10px 0;border-bottom:1px solid var(--border);">
+          <div style="font-weight:600;font-size:14px;">${escapeHtml(r.title)}</div>
+          <div style="font-size:12px;color:var(--text-secondary);">${escapeHtml(r.body || '')}</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-secondary);">${formatDate(r.schedule_at)}</div>
+        </div>`).join('');
+      // Appointments
+      const ap = document.getElementById('appts-list');
+      if (!appointments?.length) ap.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई अपॉइंटमेंट नहीं</div>';
+      else ap.innerHTML = appointments.slice(0, 5).map(a =>
+        `<div style="padding:8px 0;border-bottom:1px solid var(--border);">
+          <div style="font-size:13px;">${formatDate(a.scheduled_at)}</div>
+          <div style="font-size:11px;color:var(--text-secondary);">${escapeHtml(a.status || '')}</div>
+        </div>`).join('');
+      // Allergies
+      const al = document.getElementById('allergies-list');
+      if (!allergies?.length) al.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई ज्ञात एलर्जी नहीं</div>';
+      else al.innerHTML = allergies.map(a =>
+        `<span class="rx-pill">⚠️ ${escapeHtml(a.allergen)} ${a.severity ? '(' + a.severity + ')' : ''}</span>`).join('');
+    }
+    function showSection(id) {
+      const el = document.getElementById(id + '-section');
+      el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+    function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function metricLabel(m) {
+      const map = { systolic: 'रक्तचाप (ऊपरी)', diastolic: 'रक्तचाप (नीचे)', pulse: 'नाड़ी',
+        glucose_fasting: 'खाली पेट शुगर', glucose_pp: 'भोजन के बाद शुगर',
+        weight_kg: 'वज़न', temp_c: 'तापमान', spo2: 'SpO2' };
+      return map[m] || m;
+    }
+    function formatDate(s) {
+      if (!s) return '—';
+      try {
+        const d = new Date(s);
+        return d.toLocaleString('hi-IN', { dateStyle: 'short', timeStyle: 'short' });
+      } catch { return s; }
+    }
+    async function logout() {
+      await fetch('/api/patient/auth/logout', { method: 'POST' });
+      window.location.href = '/patient';
+    }
+    document.getElementById('logout-btn').onclick = logout;
+    load();
+  </script>
+</body>
+</html>

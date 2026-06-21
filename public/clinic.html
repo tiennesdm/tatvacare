@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Clinic · TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .clinic-card {
+      background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-card-2) 100%);
+      border: 1px solid var(--border); border-radius: var(--r-lg);
+      padding: var(--s-5); margin-bottom: var(--s-4);
+    }
+    .clinic-card h2 { margin: 0 0 8px; }
+    .doctor-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px;
+    }
+    .doctor-card {
+      background: var(--bg-base); padding: 12px; border-radius: var(--r-md);
+      border: 1px solid var(--border);
+    }
+    .doctor-card .name { font-weight: 600; margin-bottom: 4px; }
+    .doctor-card .spec { font-size: 12px; color: var(--text-secondary); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-host"></div>
+  <div id="modal-host"></div>
+  <main class="content">
+    <div class="topbar">
+      <h1>🏥 Clinic Management</h1>
+      <div class="topbar-actions">
+        <span style="font-size:12px;color:var(--text-secondary);">Multi-tenancy</span>
+      </div>
+    </div>
+    <div id="clinics">Loading…</div>
+  </main>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('clinic');
+      load();
+    })();
+    async function load() {
+      const r = await fetch('/api/clinics');
+      const j = await r.json();
+      const out = document.getElementById('clinics');
+      if (!j.clinics?.length) { out.innerHTML = '<div class="empty">कोई clinic नहीं</div>'; return; }
+      out.innerHTML = await Promise.all(j.clinics.map(async c => {
+        const dr = await fetch('/api/clinics/' + c.clinic_id + '/doctors');
+        const dj = await dr.json();
+        return `
+        <div class="clinic-card">
+          <h2>🏥 ${escapeHtml(c.name)}</h2>
+          <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+            📍 ${escapeHtml(c.city || '—')} · 📞 ${escapeHtml(c.phone || '—')} · 🆔 ${escapeHtml(c.abha_facility_id || '—')}
+          </div>
+          <h3 style="margin:0 0 8px;font-size:14px;">👨‍⚕️ Doctors (${dj.doctors?.length || 0})</h3>
+          <div class="doctor-grid">
+            ${(dj.doctors || []).map(d => `
+              <div class="doctor-card">
+                <div class="name">${escapeHtml(d.full_name)}</div>
+                <div class="spec">${escapeHtml(d.primary_specialty || '—')}</div>
+                <div class="spec">${escapeHtml(d.email || '—')}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>`;
+      }));
+      out.innerHTML = await Promise.all(j.clinics.map(async c => {
+        const dr = await fetch('/api/clinics/' + c.clinic_id + '/doctors');
+        const dj = await dr.json();
+        return `
+        <div class="clinic-card">
+          <h2>🏥 ${escapeHtml(c.name)}</h2>
+          <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+            📍 ${escapeHtml(c.city || '—')} · 📞 ${escapeHtml(c.phone || '—')} · 🆔 ${escapeHtml(c.abha_facility_id || '—')}
+          </div>
+          <h3 style="margin:0 0 8px;font-size:14px;">👨‍⚕️ Doctors (${dj.doctors?.length || 0})</h3>
+          <div class="doctor-grid">
+            ${(dj.doctors || []).map(d => `
+              <div class="doctor-card">
+                <div class="name">${escapeHtml(d.full_name)}</div>
+                <div class="spec">${escapeHtml(d.primary_specialty || '—')}</div>
+                <div class="spec">${escapeHtml(d.email || '—')}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>`;
+      }));
+    }
+    function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  </script>
+</body>
+</html>

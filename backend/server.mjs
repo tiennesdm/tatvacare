@@ -1,4 +1,4 @@
-// TatvaCare server v2 — sidebar layout, full clinical features
+// TatvaCare server v3 — patient portal, i18n, LLM, RAG, telemedicine, audit, multi-tenancy
 import express from 'express';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -10,6 +10,12 @@ import * as clinical from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/c
 import { generateRxPdf } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/pdf.mjs';
 import { ICD10_CODES } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/icd10.mjs';
 import { INDIAN_FORMULARY, searchDrugs, getDrugMonograph, drugsForIndication } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/formulary.mjs';
+import * as patientAuth from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/patient_auth.mjs';
+import { audit } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/audit.mjs';
+import { llmComplete, logUsage, isEnabled as llmEnabled, formatPatientContext } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/llm.mjs';
+import { augmentPrompt, retrieve as ragRetrieve } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/rag.mjs';
+import * as i18n from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/i18n.mjs';
+import * as remindersLib from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/reminders.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
@@ -41,9 +47,26 @@ function requireAuth(req, res, next) {
 }
 
 // ============ FRONTEND (static) ============
-const pages = ['index', 'login', 'signup', 'dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai'];
-const authPages = ['dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai'];
+const pages = ['index', 'login', 'signup', 'dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai', 'analytics', 'reminders', 'telemedicine', 'audit', 'clinic'];
+const authPages = ['dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai', 'analytics', 'reminders', 'telemedicine', 'audit'];
+const patientPages = ['patient/login', 'patient/home', 'patient/log-vitals', 'patient/telemedicine'];
+
+// Register patient pages directly (before generic routes catch them)
+patientPages.forEach(p => {
+  app.get('/' + p.replace(/^patient\//, 'patient/'), (req, res) => servePage(p, req, res));
+});
+// /patient itself → patient/login (the entry)
+app.get('/patient', (req, res) => res.redirect('/patient/login'));
 const servePage = async (p, req, res) => {
+  // Patient pages are public (patient logs in via /api/patient/auth/login)
+  if (patientPages.includes(p)) {
+    res.setHeader('Content-Type', 'text/html');
+    const file = join(PUBLIC_DIR, p + '.html');
+    if (existsSync(file)) {
+      return res.send(readFileSync(file));
+    }
+    return res.status(404).send('Patient page not found');
+  }
   if (authPages.includes(p)) {
     const sess = await getSession(req);
     if (!sess) return res.redirect('/login');
@@ -456,6 +479,23 @@ app.post('/api/ai/dl/retinopathy', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
+// ============ CLINICS (multi-tenancy) ============
+app.get('/api/clinics', requireAuth, async (req, res) => {
+  const r = await pool.query(`SELECT clinic_id, name, city, address, phone, abha_facility_id, created_at FROM clinics`);
+  jsonRes(res, { clinics: r.rows.map(row => ({
+    clinic_id: row[0], name: row[1], city: row[2], address: row[3], phone: row[4], abha_facility_id: row[5], created_at: row[6],
+  })) });
+});
+
+app.get('/api/clinics/:id/doctors', requireAuth, async (req, res) => {
+  const r = await pool.query(
+    `SELECT doctor_id, full_name, email, primary_specialty, clinic_id FROM doctors WHERE clinic_id = '${req.params.id.replace(/'/g, "''")}'`
+  );
+  jsonRes(res, { doctors: r.rows.map(row => ({
+    doctor_id: row[0], full_name: row[1], email: row[2], primary_specialty: row[3], clinic_id: row[4],
+  })) });
+});
+
 // AI service status
 app.get('/api/ai/status', requireAuth, async (req, res) => {
   try {
@@ -463,6 +503,407 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
     jsonRes(res, await r.json());
   } catch (e) {
     jsonRes(res, { status: 'down', error: e.message });
+  }
+});// ============ ADMIN UI ============
+app.get('/api/ai/status', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    jsonRes(res, await r.json());
+  } catch (e) {
+    jsonRes(res, { status: 'down', error: e.message });
+  }
+});
+
+// ============ PATIENT PORTAL ============
+const requirePatientAuth = async (req, res, next) => {
+  const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
+  const sess = await patientAuth.getPatientSession(pool, sid);
+  if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
+  req.patientSession = sess;
+  next();
+};
+
+app.post('/api/patient/auth/login', async (req, res) => {
+  const { phoneOrEmail, password } = req.body || {};
+  if (!phoneOrEmail || !password) return errRes(res, 'phoneOrEmail and password required');
+  const phone = phoneOrEmail.includes('@') ? null : phoneOrEmail;
+  try {
+    const r = await patientAuth.loginPatient(pool, phone || phoneOrEmail, password);
+    if (!r) return errRes(res, 'invalid credentials', 401, 'UNAUTHORIZED');
+    if (r.locked) return errRes(res, `locked until ${r.until}`, 423, 'LOCKED');
+    if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
+    res.setHeader('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+    await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
+    jsonRes(res, { patient: r.patient });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.post('/api/patient/auth/logout', requirePatientAuth, async (req, res) => {
+  await patientAuth.logoutPatient(pool, req.patientSession.session_id);
+  res.setHeader('Set-Cookie', `pid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  jsonRes(res, { ok: true });
+});
+
+app.get('/api/patient/auth/me', requirePatientAuth, (req, res) => {
+  jsonRes(res, { patient: req.patientSession.patient });
+});
+
+app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
+  // Full chart for the logged-in patient
+  const pid = req.patientSession.patient.patient_id;
+  try {
+    const patient = await doc.getPatient(pool, pid);
+    const problems = (await clinical.getPatientProblems(pool, pid)).map(r => ({
+      problem_name: r[0], icd10: r[1], since: r[2],
+    }));
+    const allergies = (await clinical.getPatientAllergies(pool, pid)).map(r => ({
+      allergen: r[0], severity: r[1], reaction: r[2],
+    }));
+    const rxRows = await clinical.getPatientPrescriptions(pool, pid);
+    const rx = rxRows.slice(0, 20).map(r => ({
+      rx_id: r[0], rx_number: r[1], doctor_name: r[2], created_at: r[3],
+      diagnosis_label: r[4], advice: r[5], followup_in_days: r[6],
+    }));
+    const appts = (await clinical.getPatientAppointments(pool, pid)).map(r => ({
+      appointment_id: r[0], doctor_name: r[1], scheduled_at: r[2], status: r[3],
+    }));
+    const vitals = await clinical.getPatientVitals(pool, pid);
+    const reminders = (await remindersLib.getRemindersForPatient(pool, pid)).map(r => ({
+      reminder_id: r[0], kind: r[1], title: r[2], body: r[3],
+      schedule_type: r[4], schedule_at: r[5], channel: r[6], status: r[7],
+    }));
+    jsonRes(res, { patient, problems, allergies, prescriptions: rx, appointments: appts, vitals, reminders });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.post('/api/patient/vitals', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const { metric, value, unit, notes } = req.body || {};
+  if (!metric || value === undefined) return errRes(res, 'metric + value required');
+  const log_id = 'pvl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const numValue = parseFloat(value);
+  // Auto-flag abnormal values
+  let flagged = '';
+  if (metric === 'systolic' && (numValue >= 180 || numValue < 90)) flagged = numValue >= 180 ? 'high' : 'low';
+  if (metric === 'diastolic' && (numValue >= 110 || numValue < 50)) flagged = numValue >= 110 ? 'high' : 'low';
+  if (metric === 'glucose_fasting' && (numValue >= 180 || numValue < 60)) flagged = numValue >= 180 ? 'high' : 'low';
+  if (metric === 'glucose_pp' && (numValue >= 250 || numValue < 60)) flagged = numValue >= 250 ? 'high' : 'low';
+  try {
+    await pool.query(
+      `INSERT INTO patient_vitals_log (log_id, patient_id, metric, value, unit, recorded_at, device, notes, flagged)
+       VALUES ('${log_id}', '${pid}', '${metric.replace(/'/g, "''")}', ${numValue}, '${(unit || '').replace(/'/g, "''")}', '${ts}', 'manual', '${(notes || '').replace(/'/g, "''")}', '${flagged}')`
+    );
+    await audit(pool, req, { actor_kind: 'patient', actor_id: pid, action: 'create', resource_kind: 'patient_vitals_log', resource_id: log_id, diff_json: { metric, value: numValue, flagged } });
+    jsonRes(res, { log_id, metric, value: numValue, flagged }, 201);
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const rows = await pool.query(
+    `SELECT log_id, metric, value, unit, recorded_at, flagged, notes FROM patient_vitals_log WHERE patient_id = '${pid}' ORDER BY recorded_at DESC LIMIT 200`
+  );
+  jsonRes(res, { vitals: rows.rows.map(r => ({
+    log_id: r[0], metric: r[1], value: r[2], unit: r[3], recorded_at: r[4], flagged: r[5], notes: r[6],
+  })) });
+});
+
+// ============ REMINDERS ============
+app.get('/api/reminders', requireAuth, async (req, res) => {
+  const { patient_id, status } = req.query;
+  let q = `SELECT reminder_id, patient_id, kind, title, body, schedule_type, schedule_at, channel, status, source_kind, source_id, created_at
+           FROM reminders WHERE 1=1`;
+  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
+  if (status) q += ` AND status = '${status}'`;
+  q += ' ORDER BY schedule_at ASC LIMIT 200';
+  const rows = await pool.query(q);
+  jsonRes(res, { reminders: rows.rows.map(r => ({
+    reminder_id: r[0], patient_id: r[1], kind: r[2], title: r[3], body: r[4],
+    schedule_type: r[5], schedule_at: r[6], channel: r[7], status: r[8],
+    source_kind: r[9], source_id: r[10], created_at: r[11],
+  })) });
+});
+
+app.post('/api/reminders', requireAuth, async (req, res) => {
+  const { patient_id, kind, title, body, schedule_type, schedule_at, channel } = req.body || {};
+  if (!patient_id || !kind || !title || !schedule_type) return errRes(res, 'patient_id, kind, title, schedule_type required');
+  const reminder_id = 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const schedule_at_str = (schedule_at || ts).slice(0, 19).replace('T', ' ');
+  try {
+    await pool.query(
+      `INSERT INTO reminders (reminder_id, patient_id, kind, title, body, schedule_type, schedule_at, channel, source_kind, source_id, created_at, created_by)
+       VALUES ('${reminder_id}', '${patient_id.replace(/'/g, "''")}', '${kind.replace(/'/g, "''")}', '${title.replace(/'/g, "''")}', '${(body || '').replace(/'/g, "''")}', '${schedule_type.replace(/'/g, "''")}', '${schedule_at_str}', '${(channel || 'whatsapp').replace(/'/g, "''")}', 'manual', '', '${ts}', '${req.session.doctor_id}')`
+    );
+    await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'create', resource_kind: 'reminder', resource_id: reminder_id, diff_json: { patient_id, kind, title } });
+    jsonRes(res, { reminder_id }, 201);
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.get('/api/reminders/deliveries', requireAuth, async (req, res) => {
+  const { reminder_id, patient_id } = req.query;
+  let q = `SELECT delivery_id, reminder_id, patient_id, ts, channel, status, provider_msg_id, error FROM reminder_deliveries WHERE 1=1`;
+  if (reminder_id) q += ` AND reminder_id = '${reminder_id.replace(/'/g, "''")}'`;
+  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
+  q += ' ORDER BY ts DESC LIMIT 100';
+  const rows = await pool.query(q);
+  jsonRes(res, { deliveries: rows.rows.map(r => ({
+    delivery_id: r[0], reminder_id: r[1], patient_id: r[2], ts: r[3], channel: r[4], status: r[5], provider_msg_id: r[6], error: r[7],
+  })) });
+});
+
+// Fire due reminders (cron endpoint — call every minute from a scheduler)
+app.post('/api/reminders/fire-due', requireAuth, async (req, res) => {
+  const fired = await remindersLib.fireDueReminders(pool);
+  jsonRes(res, { fired_count: fired.length, fired });
+});
+
+// ============ TELEMEDICINE ============
+app.get('/api/telemedicine/sessions', requireAuth, async (req, res) => {
+  const { patient_id, doctor_id } = req.query;
+  let q = `SELECT session_id, patient_id, doctor_id, scheduled_at, started_at, ended_at, status, channel, notes, followup_rx_id, created_at
+           FROM tele_sessions WHERE 1=1`;
+  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
+  if (doctor_id) q += ` AND doctor_id = '${doctor_id.replace(/'/g, "''")}'`;
+  q += ' ORDER BY scheduled_at DESC LIMIT 50';
+  const rows = await pool.query(q);
+  jsonRes(res, { sessions: rows.rows.map(r => ({
+    session_id: r[0], patient_id: r[1], doctor_id: r[2], scheduled_at: r[3],
+    started_at: r[4], ended_at: r[5], status: r[6], channel: r[7], notes: r[8],
+    followup_rx_id: r[9], created_at: r[10],
+  })) });
+});
+
+app.post('/api/telemedicine/sessions', requireAuth, async (req, res) => {
+  const { patient_id, scheduled_at, channel } = req.body || {};
+  if (!patient_id || !scheduled_at) return errRes(res, 'patient_id and scheduled_at required');
+  const session_id = 'tele-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    await pool.query(
+      `INSERT INTO tele_sessions (session_id, patient_id, doctor_id, scheduled_at, status, channel, created_at)
+       VALUES ('${session_id}', '${patient_id.replace(/'/g, "''")}', '${req.session.doctor_id}', '${scheduled_at.replace(/'/g, "''")}', 'scheduled', '${(channel || 'webrtc').replace(/'/g, "''")}', '${ts}')`
+    );
+    await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'create', resource_kind: 'tele_session', resource_id: session_id, diff_json: { patient_id, scheduled_at } });
+    jsonRes(res, { session_id }, 201);
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.post('/api/telemedicine/sessions/:id/start', requireAuth, async (req, res) => {
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  await pool.query(`UPDATE tele_sessions SET status = 'active', started_at = '${ts}' WHERE session_id = '${req.params.id.replace(/'/g, "''")}'`);
+  await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'start', resource_kind: 'tele_session', resource_id: req.params.id });
+  jsonRes(res, { ok: true });
+});
+
+app.post('/api/telemedicine/sessions/:id/end', requireAuth, async (req, res) => {
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const { notes, followup_rx_id } = req.body || {};
+  await pool.query(
+    `UPDATE tele_sessions SET status = 'completed', ended_at = '${ts}', notes = '${(notes || '').replace(/'/g, "''")}', followup_rx_id = '${(followup_rx_id || '').replace(/'/g, "''")}' WHERE session_id = '${req.params.id.replace(/'/g, "''")}'`
+  );
+  await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'end', resource_kind: 'tele_session', resource_id: req.params.id, diff_json: { notes, followup_rx_id } });
+  jsonRes(res, { ok: true });
+});
+
+app.get('/api/telemedicine/sessions/:id/messages', requireAuth, async (req, res) => {
+  const rows = await pool.query(
+    `SELECT message_id, session_id, ts, sender_kind, sender_id, body FROM tele_messages WHERE session_id = '${req.params.id.replace(/'/g, "''")}' ORDER BY ts ASC`
+  );
+  jsonRes(res, { messages: rows.rows.map(r => ({
+    message_id: r[0], session_id: r[1], ts: r[2], sender_kind: r[3], sender_id: r[4], body: r[5],
+  })) });
+});
+
+app.post('/api/telemedicine/sessions/:id/messages', requireAuth, async (req, res) => {
+  const { body } = req.body || {};
+  if (!body) return errRes(res, 'body required');
+  const message_id = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  await pool.query(
+    `INSERT INTO tele_messages (message_id, session_id, ts, sender_kind, sender_id, body)
+     VALUES ('${message_id}', '${req.params.id.replace(/'/g, "''")}', '${ts}', 'doctor', '${req.session.doctor_id}', '${body.replace(/'/g, "''")}')`
+  );
+  jsonRes(res, { message_id }, 201);
+});
+
+// ============ POPULATION HEALTH / ANALYTICS ============
+app.get('/api/analytics/cohort', requireAuth, async (req, res) => {
+  // Cohort finder — find patients matching criteria
+  const { condition, min_age, max_age, hba1c_above, on_medication } = req.query;
+  const allRows = await pool.query(`SELECT patient_id, full_name, gender, dob, phone FROM patients WHERE is_active = 1 LIMIT 500`);
+  const patients = allRows.rows.map(r => ({
+    patient_id: r[0], full_name: r[1], gender: r[2], dob: r[3], phone: r[4],
+    age_years: r[3] ? Math.floor((Date.now() - new Date(r[3]).getTime()) / (365.25 * 86400 * 1000)) : null,
+  }));
+  const matches = [];
+  for (const p of patients) {
+    if (min_age && (p.age_years || 0) < parseInt(min_age)) continue;
+    if (max_age && (p.age_years || 0) > parseInt(max_age)) continue;
+    const problems = await clinical.getPatientProblems(pool, p.patient_id);
+    const allProblems = problems.map(r => (r[0] || '').toLowerCase()).join(' ');
+    if (condition && !allProblems.includes(condition.toLowerCase())) continue;
+    if (on_medication) {
+      const meds = await clinical.getPatientPrescriptions(pool, p.patient_id);
+      const drugList = meds.map(r => (r[1] || '').toLowerCase()).join(' ');
+      if (!drugList.includes(on_medication.toLowerCase())) continue;
+    }
+    if (hba1c_above) {
+      const vitals = await clinical.getPatientVitals(pool, p.patient_id);
+      const hba1c = vitals.find(v => v[2] && v[2].toLowerCase().includes('hba1c'));
+      if (!hba1c || !hba1c[3] || parseFloat(hba1c[3]) < parseFloat(hba1c_above)) continue;
+    }
+    matches.push({
+      patient_id: p.patient_id,
+      full_name: p.full_name,
+      age: p.age_years,
+      gender: p.gender,
+      phone: p.phone,
+      problems: problems.map(r => r[0]),
+    });
+  }
+  jsonRes(res, { cohort_size: matches.length, patients: matches.slice(0, 100), criteria: req.query });
+});
+
+app.get('/api/analytics/clinic-overview', requireAuth, async (req, res) => {
+  const allRows = await pool.query(`SELECT patient_id, full_name, dob FROM patients WHERE is_active = 1`);
+  const allRx = (await clinical.listAllPrescriptions(pool, { limit: 1000 })).prescriptions || [];
+  const allVitals = await clinical.getAllVitals(pool);
+  const diabetic = [];
+  const hypertensive = [];
+  const uncontrolledDm = [];
+  let totalAgeSum = 0, ageN = 0;
+  for (const r of allRows.rows) {
+    const pid = r[0], full_name = r[1], dob = r[2];
+    const age = dob ? Math.floor((Date.now() - new Date(dob).getTime()) / (365.25 * 86400 * 1000)) : null;
+    if (age) { totalAgeSum += age; ageN++; }
+    const problems = await clinical.getPatientProblems(pool, pid);
+    const txt = problems.map(x => (x[0] || '').toLowerCase()).join(' ');
+    if (txt.includes('diabetes') || txt.includes('dm')) diabetic.push({ patient_id: pid, full_name });
+    if (txt.includes('hypertension') || txt.includes('htn')) hypertensive.push({ patient_id: pid, full_name });
+    if (txt.includes('diabetes')) {
+      const v = allVitals.filter(x => x[1] === pid && x[2] && x[2].toLowerCase().includes('hba1c'));
+      const latestHba1c = v[0];
+      if (latestHba1c && parseFloat(latestHba1c[3] || 0) >= 8) uncontrolledDm.push({ patient_id: pid, full_name });
+    }
+  }
+  const remindersCount = (await pool.query(`SELECT COUNT(*) as c FROM reminders WHERE status = 'active'`)).rows[0][0];
+  const teleCount = (await pool.query(`SELECT COUNT(*) as c FROM tele_sessions WHERE status = 'scheduled'`)).rows[0][0];
+  jsonRes(res, {
+    total_patients: allRows.rows.length,
+    avg_age: ageN ? Math.round(totalAgeSum / ageN) : null,
+    diabetic_count: diabetic.length,
+    diabetic: diabetic.slice(0, 10),
+    hypertensive_count: hypertensive.length,
+    hypertensive: hypertensive.slice(0, 10),
+    uncontrolled_dm_count: uncontrolledDm.length,
+    uncontrolled_dm: uncontrolledDm.slice(0, 10),
+    prescription_count: allRx.length,
+    rx_last_30d: allRx.filter(rx => rx.created_at && (Date.now() - new Date(rx.created_at).getTime()) < 30 * 86400 * 1000).length,
+    reminders_active: remindersCount,
+    tele_sessions_scheduled: teleCount,
+  });
+});
+
+// ============ AUDIT LOG ============
+app.get('/api/audit', requireAuth, async (req, res) => {
+  const { resource_kind, resource_id, actor_id, limit } = req.query;
+  let q = `SELECT audit_id, ts, actor_kind, actor_id, action, resource_kind, resource_id, ip, diff_json FROM audit_log WHERE 1=1`;
+  if (resource_kind) q += ` AND resource_kind = '${resource_kind.replace(/'/g, "''")}'`;
+  if (resource_id) q += ` AND resource_id = '${resource_id.replace(/'/g, "''")}'`;
+  if (actor_id) q += ` AND actor_id = '${actor_id.replace(/'/g, "''")}'`;
+  q += ` ORDER BY ts DESC LIMIT ${parseInt(limit) || 100}`;
+  const rows = await pool.query(q);
+  jsonRes(res, { entries: rows.rows.map(r => ({
+    audit_id: r[0], ts: r[1], actor_kind: r[2], actor_id: r[3], action: r[4],
+    resource_kind: r[5], resource_id: r[6], ip: r[7], diff_json: r[8] ? safeParse(r[8]) : null,
+  })) });
+});
+
+// ============ RAG (clinical guidelines) ============
+app.post('/api/rag/query', requireAuth, async (req, res) => {
+  const { query } = req.body || {};
+  if (!query) return errRes(res, 'query required');
+  try {
+    const { context, citations } = await augmentPrompt(pool, query, 3);
+    if (!llmEnabled()) {
+      return jsonRes(res, {
+        method: 'rag_no_llm',
+        context,
+        citations,
+        message: 'Set OPENAI_API_KEY env var for grounded answer. Showing retrieved guidelines only.',
+      });
+    }
+    const systemPrompt = `You are a clinical decision support assistant. Use ONLY the provided clinical guidelines to answer. Cite sources using [1], [2] etc. If the guidelines do not cover the question, say "Guidelines do not provide specific advice for this case — consult senior."`;
+    const userPrompt = `Question: ${query}\n\nGuidelines:\n${context}\n\nProvide a concise answer with citations.`;
+    const t0 = Date.now();
+    const r = await llmComplete({ system: systemPrompt, user: userPrompt, temperature: 0.1, maxTokens: 500 });
+    const latency_ms = Date.now() - t0;
+    await logUsage(pool, { feature: 'rag', usage: r.usage, model: r.model, latency_ms, status: 'ok' });
+    jsonRes(res, { method: 'rag_llm', answer: r.text, citations, context, usage: r.usage });
+  } catch (e) {
+    await logUsage(pool, { feature: 'rag', latency_ms: 0, status: 'error', error: e.message });
+    errRes(res, e.message, 500);
+  }
+});
+
+function safeParse(s) {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+// ============ LLM STATUS ============
+app.get('/api/llm/status', requireAuth, (req, res) => {
+  jsonRes(res, { enabled: llmEnabled(), model: process.env.OPENAI_MODEL || 'gpt-4o-mini' });
+});
+
+// ============ UPDATED LLM-POWERED AGENTS ============
+// These use LLM when available, fall back to rules.
+async function aiAgent(name, ctx, req) {
+  if (!llmEnabled()) return null;  // signal to use rule-based
+  // Build prompt per agent
+  let systemPrompt = '';
+  let userPrompt = '';
+  if (name === 'soap') {
+    systemPrompt = 'You are an expert clinician. Convert the consultation transcript into a structured SOAP note (Subjective, Objective, Assessment, Plan). Be concise. Use medical terminology. Flag any safety concerns.';
+    userPrompt = `Patient context:\n${ctx.context || '(no context)'}\n\nTranscript:\n${ctx.transcript}\n\nReturn JSON: {"subjective": [...], "objective": [...], "assessment": [...], "plan": [...], "safety_flags": [...]}`;
+  } else if (name === 'coding') {
+    systemPrompt = 'You are an expert medical coder. From the given clinical note, suggest the most appropriate ICD-10-CM codes with descriptions. Rank by relevance. Return JSON.';
+    userPrompt = `Note: ${ctx.transcript}\n\nReturn JSON: {"codes": [{"code": "X", "description": "...", "rationale": "..."}], "confidence": 0.0-1.0}`;
+  } else if (name === 'lab_triage') {
+    systemPrompt = 'You are a clinical pathologist. Triage the lab result given patient context. Return severity (CRITICAL / ABNORMAL_HIGH / ABNORMAL_LOW / NORMAL), primary action, and 2-5 recommended actions.';
+    userPrompt = `Test: ${ctx.test_name} = ${ctx.value} ${ctx.unit || ''}\n\nPatient context:\n${ctx.context || '(no context)'}\n\nReturn JSON: {"severity": "...", "primary_action": "...", "recommendations": [...], "reasoning": "..."}`;
+  } else if (name === 'drug_ix') {
+    systemPrompt = 'You are a clinical pharmacist. Review the drug interaction report and provide a concise clinical summary. Highlight critical interactions and suggest action.';
+    userPrompt = `Interactions:\n${JSON.stringify(ctx.interactions, null, 2)}\n\nAllergy alerts:\n${JSON.stringify(ctx.allergy_alerts, null, 2)}\n\nReturn JSON: {"overall_risk": "...", "critical_interactions": [...], "recommendations": [...], "patient_facing_summary": "..."}`;
+  } else {
+    return null;
+  }
+  const t0 = Date.now();
+  const r = await llmComplete({ system: systemPrompt, user: userPrompt, json: true, temperature: 0.2, maxTokens: 800 });
+  const latency_ms = Date.now() - t0;
+  await logUsage(pool, { feature: name, patient_id: ctx.patient_id, doctor_id: req.session?.doctor_id, usage: r.usage, model: r.model, latency_ms, status: 'ok' });
+  try { return JSON.parse(r.text); } catch { return null; }
+}
+
+app.post('/api/ai/agents/llm', requireAuth, async (req, res) => {
+  // LLM-powered version of the existing agents — proxy to Python with LLM augmentation
+  const { agent, ...body } = req.body || {};
+  if (!agent) return errRes(res, 'agent required');
+  // First get the rule-based result from Python
+  const r = await fetch(`${AI_URL}/agents/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent, ...body }),
+  });
+  const baseResult = await r.json();
+  if (!llmEnabled()) return jsonRes(res, { method: 'rules_only', result: baseResult });
+  // Try to augment with LLM
+  try {
+    const enhanced = await aiAgent(agent, body, req);
+    jsonRes(res, { method: 'llm_enhanced', result: baseResult, llm_enhancement: enhanced });
+  } catch (e) {
+    await logUsage(pool, { feature: agent, status: 'error', error: e.message });
+    jsonRes(res, { method: 'rules_with_llm_error', result: baseResult, llm_error: e.message });
   }
 });
 

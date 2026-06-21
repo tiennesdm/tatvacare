@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reminders · TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .reminder-row {
+      background: var(--bg-card); padding: 14px;
+      border-radius: var(--r-md); margin-bottom: 8px;
+      border: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px;
+    }
+    .reminder-icon { font-size: 28px; }
+    .reminder-info { flex: 1; }
+    .reminder-info .title { font-weight: 600; margin-bottom: 4px; }
+    .reminder-info .meta { font-size: 12px; color: var(--text-secondary); }
+    .new-reminder-form {
+      background: var(--bg-card-2); padding: 16px;
+      border-radius: var(--r-md); margin-bottom: 16px;
+      border: 1px solid var(--border);
+    }
+    .new-reminder-form input, .new-reminder-form select, .new-reminder-form textarea {
+      width: 100%; padding: 8px; margin: 4px 0;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg-base); color: var(--text-primary);
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-host"></div>
+  <div id="modal-host"></div>
+  <main class="content">
+    <div class="topbar">
+      <h1>⏰ Patient Reminders</h1>
+      <div class="topbar-actions">
+        <button class="btn btn-primary" onclick="showNewForm()">+ New Reminder</button>
+        <button class="btn btn-ghost" onclick="loadAll()">🔄</button>
+      </div>
+    </div>
+
+    <div id="new-form" class="new-reminder-form" style="display:none;">
+      <h3 style="margin:0 0 12px;">New Reminder</h3>
+      <input type="text" id="r-title" placeholder="Title (e.g. Take Metformin 500mg)" />
+      <textarea id="r-body" placeholder="Body / instructions" rows="2"></textarea>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;">
+        <select id="r-patient"><option value="">Select patient…</option></select>
+        <select id="r-kind">
+          <option value="medication">Medication</option>
+          <option value="appointment">Appointment</option>
+          <option value="lab">Lab</option>
+          <option value="followup">Follow-up</option>
+          <option value="custom">Custom</option>
+        </select>
+        <select id="r-schedule">
+          <option value="once">Once</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+        <select id="r-channel">
+          <option value="whatsapp">WhatsApp</option>
+          <option value="sms">SMS</option>
+          <option value="push">Push</option>
+        </select>
+      </div>
+      <input type="datetime-local" id="r-schedule-at" />
+      <button class="btn btn-primary" onclick="createReminder()">Create</button>
+      <button class="btn btn-ghost" onclick="hideNewForm()">Cancel</button>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:8px;margin-bottom:12px;">
+      <div class="kpi-card"><div class="kpi-label">Active</div><div id="kpi-active" class="kpi-value">—</div></div>
+      <div class="kpi-card"><div class="kpi-label">Sent (24h)</div><div id="kpi-sent" class="kpi-value">—</div></div>
+      <div class="kpi-card"><div class="kpi-label">Failed</div><div id="kpi-failed" class="kpi-value">—</div></div>
+    </div>
+
+    <div id="reminders-list">Loading…</div>
+
+    <div style="margin-top:32px;">
+      <h3 style="margin-bottom:8px;">📨 Recent Delivery Log</h3>
+      <div id="deliveries-list" style="font-family:ui-monospace,monospace;font-size:12px;background:var(--bg-card-2);padding:12px;border-radius:var(--r-md);max-height:240px;overflow:auto;"></div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('reminders');
+      window.showNewForm = showNewForm;
+      window.hideNewForm = hideNewForm;
+      window.createReminder = createReminder;
+      window.loadAll = loadAll;
+      // Load patients for dropdown
+      try {
+        const r = await fetch('/api/patients');
+        const j = await r.json();
+        const sel = document.getElementById('r-patient');
+        (j.patients || []).forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.patient_id;
+          opt.textContent = p.full_name + ' (' + p.patient_id + ')';
+          sel.appendChild(opt);
+        });
+      } catch {}
+      loadAll();
+    })();
+
+    async function loadAll() {
+      const [r1, r2] = await Promise.all([
+        fetch('/api/reminders'),
+        fetch('/api/reminders/deliveries?limit=50'),
+      ]);
+      const rem = (await r1.json()).reminders || [];
+      const del = (await r2.json()).deliveries || [];
+      // KPIs
+      document.getElementById('kpi-active').textContent = rem.filter(r => r.status === 'active').length;
+      const dayAgo = Date.now() - 86400 * 1000;
+      document.getElementById('kpi-sent').textContent = del.filter(d => d.status === 'sent' && new Date(d.ts).getTime() > dayAgo).length;
+      document.getElementById('kpi-failed').textContent = del.filter(d => d.status === 'failed').length;
+      // List
+      const list = document.getElementById('reminders-list');
+      if (!rem.length) { list.innerHTML = '<div class="empty">कोई रिमाइंडर नहीं / No reminders</div>'; }
+      else list.innerHTML = rem.map(r => `
+        <div class="reminder-row">
+          <div class="reminder-icon">${iconFor(r.kind)}</div>
+          <div class="reminder-info">
+            <div class="title">${escapeHtml(r.title)}</div>
+            <div class="meta">${escapeHtml(r.body || '')} · 📅 ${formatDate(r.schedule_at)} · 🔁 ${r.schedule_type} · 📡 ${r.channel}</div>
+          </div>
+          <span class="badge ${r.status === 'active' ? 'low' : ''}">${r.status}</span>
+        </div>
+      `).join('');
+      // Deliveries
+      const dlist = document.getElementById('deliveries-list');
+      if (!del.length) dlist.innerHTML = '<div style="color:var(--text-secondary);">कोई डिलीवरी नहीं</div>';
+      else dlist.innerHTML = del.map(d =>
+        `<div>${formatDate(d.ts)} · ${d.channel} · <span style="color:${d.status === 'sent' ? 'green' : 'red'}">${d.status}</span> · ${escapeHtml(d.provider_msg_id || d.error || '')}</div>`
+      ).join('');
+    }
+
+    function iconFor(kind) {
+      return { medication: '💊', appointment: '📅', lab: '🧪', followup: '🔄', custom: '📌' }[kind] || '🔔';
+    }
+
+    function showNewForm() { document.getElementById('new-form').style.display = 'block'; }
+    function hideNewForm() { document.getElementById('new-form').style.display = 'none'; }
+
+    async function createReminder() {
+      const patient_id = document.getElementById('r-patient').value;
+      if (!patient_id) return TatvaCare.toast('Select patient', 'warn');
+      const body = {
+        patient_id,
+        kind: document.getElementById('r-kind').value,
+        title: document.getElementById('r-title').value,
+        body: document.getElementById('r-body').value,
+        schedule_type: document.getElementById('r-schedule').value,
+        schedule_at: document.getElementById('r-schedule-at').value || new Date().toISOString().slice(0, 19),
+        channel: document.getElementById('r-channel').value,
+      };
+      const r = await fetch('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (r.ok) {
+        TatvaCare.toast('Reminder created', 'success');
+        hideNewForm();
+        loadAll();
+      } else {
+        TatvaCare.toast('Failed', 'error');
+      }
+    }
+
+    function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function formatDate(s) { if (!s) return '—'; try { return new Date(s).toLocaleString('hi-IN', { dateStyle: 'short', timeStyle: 'short' }); } catch { return s; } }
+  </script>
+</body>
+</html>

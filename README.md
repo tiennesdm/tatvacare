@@ -217,6 +217,106 @@ The AI service ships with these explicit disclaimers in every response:
 - **LLM agent hallucination risk** — drug Ix call goes through structured Vedadb table check first, LLM only summarizes.
 - **Doctor signs every output** — no autonomous prescribing, diagnosis, or treatment.
 
+## Tier 1-3: Patient portal + clinical intelligence (this release)
+
+Beyond the doctor's UI + AI hub, this build adds the patient-facing side of chronic care and a clinical-intelligence layer that ties it all together.
+
+### Patient Portal (Hindi, PWA-installable)
+
+Patients can self-monitor between visits:
+
+- **`/patient/login`** — phone + OTP-style password login (separate session cookie `pid`)
+- **`/patient/home`** — last 30 days vitals chart, active Rx with download link, upcoming reminders, active problems list
+- **`/patient/log-vitals`** — quick-entry form (BP, glucose, weight, SpO₂, temp, HR, sleep) with auto-flagging for out-of-range values (e.g. BP ≥180/110 → "urgent" badge)
+- **`/patient/telemedicine`** — WebRTC video call with chat (signaling via REST)
+- **PWA** — `manifest.json` + `sw.js` so patients can install the portal as a home-screen app; service worker pre-caches the app shell for offline load (login still requires network)
+
+All UI strings are in Hindi (`backend/lib/i18n.mjs`). Patient data lives in the same Vedadb instance — `patient_credentials`, `patient_vitals_log`, `reminders`, `tele_sessions`, `tele_messages` tables.
+
+### Telemedicine (WebRTC + REST signaling)
+
+- Doctor opens `/telemedicine` → patient ID → backend creates `tele_session`, returns `session_id`
+- Doctor + patient each open the same `session_id` in their respective UIs
+- In-call chat posts to `/api/telemedicine/:id/messages` → stored in `tele_messages`
+- "Start Rx for patient" button (doctor console) deep-links to `/dashboard/prescribe?patient_id=X`
+- "End call" marks the session as ended with `ended_at` timestamp
+
+### Population health dashboard (`/analytics`)
+
+Doctor + clinic view:
+- **Clinic overview** — patient count by risk band, problem-distribution treemap, vitals control rates (BP/glucose/HbA1c at goal)
+- **Cohort finder** — filter patients by ≥1 criteria: age band, diagnosis (ICD-10), HbA1c bucket, BP control status, recent visit
+- **At-risk list** — patients with multi-flag anomaly (high BP + uncontrolled glucose + low adherence)
+- All aggregations done via SQL on Vedadb; no Python ML in this view.
+
+### Reminders (WhatsApp/SMS/Email/Push)
+
+- Create reminders per patient (drug refill, vitals check, follow-up) with channel preference
+- Channels are pluggable — `backend/lib/reminders.mjs` ships with mock providers that log to console + DB; Twilio/Meta-WhatsApp swap-in for prod
+- `/api/reminders/fire-due` endpoint for cron (returns delivery count)
+- `/reminders` page shows scheduled + delivery log + success/fail counts
+
+### RAG over clinical guidelines (`/api/rag/query`)
+
+11 seeded guideline documents (WHO, AACE, ICMR, NICE, AAAAI, MoHFW) indexed by keyword TF-IDF. Query endpoint:
+
+```json
+POST /api/rag/query
+{ "query": "metformin first line for diabetes" }
+
+→ {
+  "method": "rag_no_llm",
+  "context": "[1] WHO: WHO Type 2 Diabetes Management\nFirst-line therapy...",
+  "citations": [{ "source": "WHO", "score": 0.412 }, ...],
+  "message": "Set OPENAI_API_KEY env var for grounded answer."
+}
+```
+
+When `OPENAI_API_KEY` is set, an LLM call (`backend/lib/llm.mjs` → OpenAI API with `gpt-4o-mini`) re-generates the answer grounded on the retrieved context, with explicit citation tracking and token-usage logging to `llm_usage`.
+
+### LLM augmentation in clinical agents
+
+The 5 LangGraph agents (lab_triage / drug_ix / followup / soap / coding) now proxy through `/api/ai/agents/llm`. Without an API key, they return the deterministic rules-based answer. With a key, the rules are passed as `context` to the LLM which produces a richer narrative grounded on the rules + retrieved guidelines.
+
+### Audit log (`/audit`)
+
+Every mutation is captured in `audit_log`:
+- login (success/fail with actor)
+- patient create
+- vitals add
+- Rx create
+- note add/delete
+- reminder create
+- AI agent run (with confidence score)
+
+Indexed on `ts DESC`, `resource_kind + resource_id`, `actor_kind + actor_id`, `clinic_id`. The `/audit` page lets the doctor filter by actor / resource / time window.
+
+### Multi-tenancy basics
+
+`clinics` table seeded with one demo clinic (`cl-001 / TatvaCare Demo Clinic / Mumbai`). `doctors.clinic_id` FK added (auto-set to `cl-001` for existing rows). `/clinic` page lists clinics and the doctors under each. Production-ready multi-tenancy (cross-clinic isolation, clinic-scoped queries) is deferred — see `docs/AI_UPGRADE_RESEARCH.md` Tier 4.
+
+### New backend libs
+
+| File | What it does |
+|---|---|
+| `backend/lib/patient_auth.mjs` | Patient login + `pid` session cookie (separate from doctor's `sid`) |
+| `backend/lib/audit.mjs` | Audit-log writer for all mutations |
+| `backend/lib/llm.mjs` | OpenAI wrapper with token tracking + clinical-context formatter |
+| `backend/lib/rag.mjs` | TF-IDF RAG over `kb_documents` (no external API needed) |
+| `backend/lib/i18n.mjs` | Hindi strings + EN→HI word/phrase map for auto-translation |
+| `backend/lib/reminders.mjs` | WhatsApp/SMS/Email/Push mock providers + `fireDueReminders` |
+
+### Demo flow (extended)
+
+1. Doctor logs in as Dr. Aanya (`+919876500001`)
+2. Dashboard → Analytics → see population health + cohort finder
+3. Open `/reminders` → create a refill reminder for patient
+4. Open `/telemedicine` → start a call with patient
+5. Open `/ai` → run drug interaction check with LLM augmentation
+6. Open `/audit` → see all of the above captured
+7. Open `/clinic` → see doctors under clinic
+8. Patient logs in at `/patient/login` as `+919812345670 / patient123` → log vitals → see flagged "high BP" badge → start telemedicine call with doctor
+
 ## Engine integration
 
 This app is the test-bed for Vedadb's VBP v1 wire protocol. Bugs found while building this app are filed as PRs against `tiennesdm/vedadb-engine`:
