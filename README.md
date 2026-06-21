@@ -153,9 +153,9 @@ python -m uvicorn service.main:app --host 127.0.0.1 --port 7100
 
 | Phone | Password | Role |
 |---|---|---|
-| `+919876500001` | `tatva123` | Dr. Aanya Sharma — Endocrinologist |
-| `+919876500002` | `tatva123` | Dr. Vikram Iyer — GP |
-| `+919876500003` | `tatva123` | Dr. Priya Menon — Pediatrician |
+| `+919876500001` | `tatva123` | Dr. Priya Sharma — Cardiologist |
+| `+919876500002` | `tatva123` | Dr. Rajesh Verma — General Medicine |
+| `+919876500003` | `tatva123` | Dr. Anjali Iyer — Pediatrician |
 
 ## What's in the box
 
@@ -308,7 +308,7 @@ Indexed on `ts DESC`, `resource_kind + resource_id`, `actor_kind + actor_id`, `c
 
 ### Demo flow (extended)
 
-1. Doctor logs in as Dr. Aanya (`+919876500001`)
+1. Doctor logs in as Dr. Priya Sharma (`+919876500001`)
 2. Dashboard → Analytics → see population health + cohort finder
 3. Open `/reminders` → create a refill reminder for patient
 4. Open `/telemedicine` → start a call with patient
@@ -376,7 +376,7 @@ This keeps everything in one process while avoiding the conflict.
 
 ### Demo flow
 
-1. Log in as Dr. Aanya (`+919876500001`)
+1. Log in as Dr. Priya Sharma (`+919876500001`)
 2. Dashboard shows today's schedule + tasks
 3. Open patient → see vitals chart, problems, allergies, notes
 4. Prescribe → ICD-10 autocomplete, drug autocomplete with interaction check, sign

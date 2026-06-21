@@ -168,11 +168,29 @@ async function logout() {
 async function initPage(active) {
   const me = await loadMe();
   if (!me) { window.location.href = '/login'; return null; }
-  // Auto-inject sidebar if missing
   const app = document.getElementById('app');
-  if (app && !app.querySelector('.sidebar')) {
-    const main = app.querySelector('main');
-    app.innerHTML = renderSidebar(active) + (main ? main.outerHTML : '');
+  // Phase-1 fix: ai.html / analytics.html / reminders.html / audit.html /
+  // clinic.html put <main class="content"> as a sibling of <div id="app">
+  // instead of inside it. Without this, the `.app` CSS grid (sidebar +
+  // main) never forms and the dark sidebar stretches full-height while
+  // the main content is pushed ~600-1000px below the fold. Detect the
+  // stray <main> and move it inside the .app container, then ensure the
+  // grid container has the `app` class.
+  if (app) {
+    let main = app.querySelector('main');
+    if (!main) {
+      const stray = Array.from(document.body.children).find(
+        el => el.tagName === 'MAIN' && el !== app && !el.closest('#app')
+      );
+      if (stray) {
+        app.appendChild(stray);
+        main = stray;
+      }
+    }
+    if (!app.classList.contains('app')) app.classList.add('app');
+    if (!app.querySelector('.sidebar')) {
+      app.innerHTML = renderSidebar(active) + (main ? main.outerHTML : '');
+    }
   }
   const avatar = document.getElementById('user-avatar');
   const name = document.getElementById('user-name');

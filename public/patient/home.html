@@ -165,11 +165,18 @@
       if (!recent.length) vl.innerHTML = '<div style="color:var(--text-secondary);font-size:13px;">कोई हाल की रीडिंग नहीं — <a href="/patient/log-vitals">अभी दर्ज करें</a></div>';
       else vl.innerHTML = recent.map(v => {
         const flagClass = v.flagged === 'high' ? 'high' : (v.flagged === 'low' ? 'low' : '');
+        // Phase-1 fix: defensive guards so that an unexpected API shape
+        // (e.g. server returning the aggregated `vitals` table instead of
+        // the granular `patient_vitals_log`) renders '—' instead of the
+        // literal string 'undefined' next to the value.
+        const metricName = v.metric ? metricLabel(v.metric) : 'रीडिंग';
+        const valueText = (v.value === undefined || v.value === null) ? '—' : `${v.value}${v.unit ? ' ' + escapeHtml(v.unit) : ''}`;
+        const flagLabel = v.flagged === 'high' ? 'ऊँचा' : (v.flagged === 'low' ? 'कम' : '');
         return `<div class="vital-card">
-          <div><div class="vital-name">${escapeHtml(metricLabel(v.metric))}</div>
+          <div><div class="vital-name">${escapeHtml(metricName)}</div>
             <div style="font-size:11px;color:var(--text-secondary);">${formatDate(v.recorded_at)}</div></div>
-          <div class="vital-value">${v.value}${escapeHtml(v.unit || '')}</div>
-          ${v.flagged ? `<span class="vital-flag ${flagClass}">${v.flagged === 'high' ? 'ऊँचा' : 'कम'}</span>` : ''}
+          <div class="vital-value">${valueText}</div>
+          ${flagLabel ? `<span class="vital-flag ${flagClass}">${flagLabel}</span>` : ''}
         </div>`;
       }).join('');
       // Rx

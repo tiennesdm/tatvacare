@@ -312,7 +312,7 @@
                 <a class="btn" href="/api/prescriptions/${prescription.rx_id}/pdf" target="_blank" rel="noopener">📄 Open PDF</a>
                 <a class="btn btn-secondary" href="/api/prescriptions/${prescription.rx_id}/pdf" download="${prescription.rx_number}.pdf">⬇ Download PDF</a>
               </div>
-              <a class="btn btn-ghost" href="/dashboard/patients/${selectedPatient.patient_id}">View patient chart →</a>
+              <a class="btn btn-ghost" href="/dashboard/patient/${selectedPatient.patient_id}">View patient chart →</a>
             </div>`;
         } catch (err) {
           TatvaCare.showToast(err.message, 'error');
