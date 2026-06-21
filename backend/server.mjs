@@ -41,8 +41,8 @@ function requireAuth(req, res, next) {
 }
 
 // ============ FRONTEND (static) ============
-const pages = ['index', 'login', 'signup', 'dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary'];
-const authPages = ['dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary'];
+const pages = ['index', 'login', 'signup', 'dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai'];
+const authPages = ['dashboard', 'patients', 'patient', 'prescribe', 'calendar', 'inbox', 'drugs', 'formulary', 'ai'];
 const servePage = async (p, req, res) => {
   if (authPages.includes(p)) {
     const sess = await getSession(req);
@@ -299,6 +299,171 @@ app.get('/api/prescriptions/:id/pdf', requireAuth, async (req, res) => {
 app.get('/api/health', async (req, res) => {
   try { const pong = await pool.query('SELECT 1 AS ok'); const r = pong.rows[0]?.[0]; jsonRes(res, { status: r === '1' ? 'ok' : 'degraded', vbp: '127.0.0.1:6381' }); }
   catch (e) { errRes(res, e.message, 500, 'VBP_DOWN'); }
+});
+
+// ============ AI SERVICE PROXY (Python FastAPI on :7100) ============
+const AI_URL = process.env.AI_URL || 'http://127.0.0.1:7100';
+
+// OCR
+app.post('/api/ai/ocr/prescription', requireAuth, async (req, res) => {
+  try {
+    const { image } = req.body; // base64 data URL or raw base64
+    if (!image) return errRes(res, 'image required');
+    const b64 = image.replace(/^data:image\/\w+;base64,/, '');
+    const r = await fetch(`${AI_URL}/ocr/prescription`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64 }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.post('/api/ai/ocr/lab-report', requireAuth, async (req, res) => {
+  try {
+    const { image } = req.body;
+    if (!image) return errRes(res, 'image required');
+    const b64 = image.replace(/^data:image\/\w+;base64,/, '');
+    const r = await fetch(`${AI_URL}/ocr/lab-report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64 }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// NLP — extract entities / suggest ICD-10
+app.post('/api/ai/nlp/entities', requireAuth, async (req, res) => {
+  try {
+    const { text } = req.body;
+    const r = await fetch(`${AI_URL}/nlp/extract-entities`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text || '' }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.post('/api/ai/nlp/icd10', requireAuth, async (req, res) => {
+  try {
+    const { text, top_k } = req.body;
+    const r = await fetch(`${AI_URL}/nlp/suggest-icd10`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text || '', top_k: top_k || 5 }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// Voice — proxy multipart
+import('node:buffer').then(() => {});
+
+app.post('/api/ai/voice/transcribe', requireAuth, async (req, res) => {
+  try {
+    const ct = req.headers['content-type'] || '';
+    if (!ct.includes('multipart/form-data')) return errRes(res, 'multipart/form-data required');
+    // Forward the raw body as multipart to AI service
+    const r = await fetch(`${AI_URL}/voice/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': ct },
+      body: req,
+    });
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader('Content-Type', r.headers.get('content-type') || 'application/json');
+    res.send(buf);
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// ML — risk / anomaly / forecast
+app.post('/api/ai/ml/risk', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/ml/risk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patient_id: req.body.patient_id }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.post('/api/ai/ml/anomaly', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/ml/anomaly`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patient_id: req.body.patient_id, metric: req.body.metric || 'systolic' }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.post('/api/ai/ml/forecast', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/ml/forecast`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        patient_id: req.body.patient_id,
+        metric: req.body.metric || 'systolic',
+        horizon_days: req.body.horizon_days || 7,
+      }),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// Agents
+app.post('/api/ai/agents/run', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/agents/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.get('/api/ai/agents/activity', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/agents/activity?limit=${parseInt(req.query.limit) || 20}`);
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.get('/api/ai/agents/list', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/agents/list`);
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// DL — ECG + retinopathy
+app.post('/api/ai/dl/ecg', requireAuth, async (req, res) => {
+  try {
+    const ct = req.headers['content-type'] || '';
+    const r = await fetch(`${AI_URL}/dl/ecg/classify`, {
+      method: 'POST', headers: { 'Content-Type': ct }, body: req,
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+app.post('/api/ai/dl/retinopathy', requireAuth, async (req, res) => {
+  try {
+    const ct = req.headers['content-type'] || '';
+    const r = await fetch(`${AI_URL}/dl/retinopathy/screen`, {
+      method: 'POST', headers: { 'Content-Type': ct }, body: req,
+    });
+    jsonRes(res, await r.json());
+  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+});
+
+// AI service status
+app.get('/api/ai/status', requireAuth, async (req, res) => {
+  try {
+    const r = await fetch(`${AI_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    jsonRes(res, await r.json());
+  } catch (e) {
+    jsonRes(res, { status: 'down', error: e.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;

@@ -1,0 +1,18 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+requests
+numpy
+pandas
+pydantic
+Pillow
+pytesseract
+scikit-learn
+xgboost
+joblib
+openai-whisper
+torch --index-url https://download.pytorch.org/whl/cpu
+transformers
+langchain
+langchain-openai
+langgraph

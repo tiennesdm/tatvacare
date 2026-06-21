@@ -47,3 +47,20 @@ edadb-server
 
 # Test artifacts that aren't part of the repo
 /tmp/
+
+# AI service venv + models + data
+ai/.venv/
+ai/models/
+ai/data/
+ai/uploads/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Service logs
+logs/

@@ -112,6 +112,8 @@ function renderSidebar(active) {
       <a href="/dashboard/inbox" class="nav-link ${active === 'inbox' ? 'active' : ''}" id="nav-inbox">${ICONS.inbox}<span>Inbox</span><span class="badge" id="inbox-count" style="display:none">0</span></a>
       <a href="/dashboard/drugs" class="nav-link ${active === 'drugs' ? 'active' : ''}">${ICONS.drugs}<span>Drug DB</span></a>
       <a href="/dashboard/formulary" class="nav-link ${active === 'formulary' ? 'active' : ''}">${ICONS.drugs}<span>Drug Monographs</span></a>
+      <div class="nav-section">AI Assistant <span class="ai-badge">βeta</span></div>
+      <a href="/ai" class="nav-link ${active === 'ai' ? 'active' : ''}" id="nav-ai">${ICONS.dashboard}<span>AI Hub</span></a>
       <div class="user-card" id="user-card">
         <div class="avatar" id="user-avatar">?</div>
         <div class="info">
