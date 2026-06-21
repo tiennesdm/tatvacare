@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#6366f1" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <title>रीडिंग दर्ज करें · तत्वकेयर</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    body { background: #f9fafb; }
+    .log-header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 16px 20px; }
+    .log-header h1 { margin: 0; font-size: 20px; }
+    .log-card {
+      max-width: 500px; margin: 16px auto; padding: 16px;
+      background: white; border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    .metric-tabs {
+      display: flex; overflow-x: auto; gap: 6px; padding-bottom: 12px;
+      margin-bottom: 12px; border-bottom: 1px solid var(--border);
+    }
+    .metric-tab {
+      padding: 8px 14px; border-radius: 16px; background: #f3f4f6;
+      font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .metric-tab.active { background: var(--primary); color: white; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 13px; margin-bottom: 4px; color: var(--text-secondary); }
+    .field input, .field textarea, .field select {
+      width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 16px; font-family: inherit; box-sizing: border-box;
+    }
+    .field input:focus { outline: none; border-color: var(--primary); }
+    .status-msg { padding: 12px; border-radius: 8px; margin-top: 12px; font-size: 14px; }
+    .status-msg.ok { background: #d1fae5; color: #065f46; }
+    .status-msg.warn { background: #fef3c7; color: #92400e; }
+    .status-msg.err { background: #fee2e2; color: #991b1b; }
+    .recent-section { max-width: 500px; margin: 16px auto; }
+    .recent-list { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); }
+    .recent-row { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="log-header">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <a href="/patient/home" style="color:white;text-decoration:none;font-size:20px;">←</a>
+      <h1>रीडिंग दर्ज करें</h1>
+    </div>
+  </div>
+  <div class="log-card">
+    <div class="metric-tabs">
+      <div class="metric-tab active" data-metric="systolic">रक्तचाप (ऊपरी)</div>
+      <div class="metric-tab" data-metric="diastolic">रक्तचाप (नीचे)</div>
+      <div class="metric-tab" data-metric="pulse">नाड़ी</div>
+      <div class="metric-tab" data-metric="glucose_fasting">खाली पेट शुगर</div>
+      <div class="metric-tab" data-metric="glucose_pp">भोजन के बाद शुगर</div>
+      <div class="metric-tab" data-metric="weight_kg">वज़न</div>
+      <div class="metric-tab" data-metric="temp_c">तापमान</div>
+      <div class="metric-tab" data-metric="spo2">SpO2</div>
+    </div>
+
+    <form id="log-form">
+      <input type="hidden" name="metric" id="metric" value="systolic" />
+      <div class="field">
+        <label id="value-label">रक्तचाप (mmHg)</label>
+        <input type="number" name="value" id="value" required step="0.1" inputmode="decimal"
+               style="font-size:32px;font-weight:700;padding:16px;text-align:center;" placeholder="—" />
+      </div>
+      <div class="field">
+        <label>नोट (वैकल्पिक)</label>
+        <textarea name="notes" id="notes" rows="2" placeholder="जैसे: सुबह की दवाई के बाद"></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;padding:14px;font-size:16px;">💾 सहेजें</button>
+      <div id="status"></div>
+    </form>
+  </div>
+
+  <div class="recent-section">
+    <h3 style="padding:0 4px;">📈 हाल की रीडिंग्स</h3>
+    <div class="recent-list" id="recent-list">लोड हो रहा है...</div>
+  </div>
+
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    const METRICS = {
+      systolic: { label: 'रक्तचाप (ऊपरी)', unit: 'mmHg' },
+      diastolic: { label: 'रक्तचाप (नीचे)', unit: 'mmHg' },
+      pulse: { label: 'नाड़ी', unit: 'bpm' },
+      glucose_fasting: { label: 'खाली पेट शुगर', unit: 'mg/dL' },
+      glucose_pp: { label: 'भोजन के बाद शुगर', unit: 'mg/dL' },
+      weight_kg: { label: 'वज़न', unit: 'kg' },
+      temp_c: { label: 'तापमान', unit: '°C' },
+      spo2: { label: 'SpO2', unit: '%' },
+    };
+    let current = 'systolic';
+    document.querySelectorAll('.metric-tab').forEach(t => {
+      t.onclick = () => {
+        document.querySelectorAll('.metric-tab').forEach(x => x.classList.remove('active'));
+        t.classList.add('active');
+        current = t.dataset.metric;
+        document.getElementById('metric').value = current;
+        document.getElementById('value-label').textContent = METRICS[current].label + ' (' + METRICS[current].unit + ')';
+        document.getElementById('value').value = '';
+        document.getElementById('value').placeholder = '';
+        document.getElementById('status').innerHTML = '';
+      };
+    });
+    document.getElementById('log-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const v = parseFloat(document.getElementById('value').value);
+      if (!isFinite(v)) return;
+      const unit = METRICS[current].unit;
+      const notes = document.getElementById('notes').value;
+      try {
+        const r = await fetch('/api/patient/vitals', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ metric: current, value: v, unit, notes }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error?.message || 'failed');
+        const flagged = j.flagged;
+        const msg = flagged === 'high' ? '<div class="status-msg warn">⚠️ यह मान सामान्य से अधिक है — कृपया डॉक्टर से संपर्क करें।</div>'
+                    : flagged === 'low' ? '<div class="status-msg warn">⚠️ यह मान सामान्य से कम है — कृपया डॉक्टर से संपर्क करें।</div>'
+                    : '<div class="status-msg ok">✅ रीडिंग सफलतापूर्वक सहेजी गई!</div>';
+        document.getElementById('status').innerHTML = msg;
+        document.getElementById('value').value = '';
+        document.getElementById('notes').value = '';
+        loadRecent();
+      } catch (err) {
+        document.getElementById('status').innerHTML = '<div class="status-msg err">त्रुटि: ' + err.message + '</div>';
+      }
+    };
+    async function loadRecent() {
+      const r = await fetch('/api/patient/vitals');
+      const j = await r.json();
+      const list = document.getElementById('recent-list');
+      if (!j.vitals?.length) { list.innerHTML = '<div style="color:var(--text-secondary);">कोई रीडिंग नहीं</div>'; return; }
+      list.innerHTML = j.vitals.slice(0, 20).map(v =>
+        `<div class="recent-row">
+          <div style="display:flex;justify-content:space-between;">
+            <span><strong>${METRICS[v.metric]?.label || v.metric}:</strong> ${v.value}${v.unit ? ' ' + v.unit : ''}</span>
+            <span style="color:var(--text-secondary);font-size:12px;">${new Date(v.recorded_at).toLocaleString('hi-IN')}</span>
+          </div>
+          ${v.flagged ? `<span style="color:#991b1b;font-size:11px;">⚠️ ${v.flagged === 'high' ? 'ऊँचा' : 'कम'}</span>` : ''}
+          ${v.notes ? `<div style="color:var(--text-secondary);font-size:12px;">${v.notes}</div>` : ''}
+        </div>`).join('');
+    }
+    loadRecent();
+  </script>
+</body>
+</html>

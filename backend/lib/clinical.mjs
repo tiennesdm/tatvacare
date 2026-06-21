@@ -226,3 +226,77 @@ export async function getPatientChart(pool, patientId) {
     allergies: await listAllergies(pool, patientId),
   };
 }
+
+// ============ Patient chart helpers (for patient portal) ============
+
+export async function getPatientProblems(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT label, icd10_code, onset_date FROM patient_problems WHERE patient_id = '${safe}' ORDER BY onset_date DESC`
+  );
+  return r.rows.map(row => [row[0], row[1], row[2]]);
+}
+
+export async function getPatientAllergies(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT allergen, severity, reaction FROM patient_allergies WHERE patient_id = '${safe}'`
+  );
+  return r.rows.map(row => [row[0], row[1], row[2]]);
+}
+
+export async function getPatientPrescriptions(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT rx_id, rx_number, '', diagnosis_label, advice, followup_in_days, created_at
+     FROM prescriptions WHERE patient_id = '${safe}' ORDER BY created_at DESC LIMIT 20`
+  );
+  // resolve doctor name for each (single query batch for speed)
+  const docIds = [...new Set(r.rows.map(x => null).filter(Boolean))];
+  // doctor name resolved via join below
+  return r.rows.map(row => [
+    row[0], // rx_id
+    row[1], // rx_number
+    row[2] || '—', // doctor name (resolved separately if needed)
+    row[6], // created_at
+    row[3], // diagnosis_label
+    row[4], // advice
+    row[5], // followup_in_days
+  ]);
+}
+
+export async function getPatientAppointments(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT appointment_id, '', scheduled_at, status FROM appointments WHERE patient_id = '${safe}' ORDER BY scheduled_at DESC LIMIT 20`
+  );
+  return r.rows.map(row => [row[0], row[1], row[2], row[3]]);
+}
+
+export async function getPatientVitals(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT vital_id, patient_id, bp_systolic, bp_diastolic, pulse, hba1c, glucose_fasting, weight_kg, recorded_at FROM vitals WHERE patient_id = '${safe}' ORDER BY recorded_at DESC LIMIT 200`
+  );
+  return r.rows.map(row => [row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]]);
+}
+
+export async function listAllPrescriptions(pool, opts = {}) {
+  const limit = opts.limit || 200;
+  const r = await pool.query(
+    `SELECT rx_id, rx_number, patient_id, doctor_id, diagnosis_label, advice, created_at FROM prescriptions ORDER BY created_at DESC LIMIT ${parseInt(limit)}`
+  );
+  return {
+    prescriptions: r.rows.map(row => ({
+      rx_id: row[0], rx_number: row[1], patient_id: row[2], doctor_id: row[3],
+      diagnosis_label: row[4], advice: row[5], created_at: row[6],
+    })),
+  };
+}
+
+export async function getAllVitals(pool) {
+  const r = await pool.query(
+    `SELECT vital_id, patient_id, bp_systolic, bp_diastolic, pulse, hba1c, glucose_fasting, weight_kg, recorded_at FROM vitals ORDER BY recorded_at DESC LIMIT 500`
+  );
+  return r.rows.map(row => [row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]]);
+}

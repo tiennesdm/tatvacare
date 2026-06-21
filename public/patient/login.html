@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#6366f1" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <title>तत्वकेयर — मेरा स्वास्थ्य</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    body { background: linear-gradient(135deg, #f0f9ff, #e0e7ff); min-height:100vh; }
+    .login-card {
+      max-width: 380px;
+      margin: 60px auto;
+      padding: 32px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(99, 102, 241, 0.15);
+    }
+    .login-card h1 { margin: 0 0 8px; font-size: 28px; color: var(--primary); }
+    .login-card p { margin: 0 0 24px; color: var(--text-secondary); }
+    .login-hint {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .lang-toggle {
+      position: absolute; top: 16px; right: 16px;
+      background: white; border: 1px solid var(--border);
+      padding: 6px 12px; border-radius: 20px;
+      font-size: 13px; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <button class="lang-toggle" id="lang-btn">EN</button>
+  <div class="login-card">
+    <h1>👋 तत्वकेयर में आपका स्वागत है</h1>
+    <p>अपना स्वास्थ्य, अपनी उँगलियों पर</p>
+    <form id="login-form">
+      <label style="display:block;font-size:13px;margin-bottom:4px;">फ़ोन नंबर</label>
+      <input type="tel" name="phoneOrEmail" required value="+919812345670"
+             style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:15px;margin-bottom:12px;" />
+      <label style="display:block;font-size:13px;margin-bottom:4px;">पासवर्ड</label>
+      <input type="password" name="password" required value="patient123"
+             style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:15px;margin-bottom:16px;" />
+      <button type="submit" class="btn btn-primary" style="width:100%;padding:12px;font-size:15px;">लॉगिन</button>
+    </form>
+    <div id="error" style="color:var(--danger);margin-top:12px;font-size:13px;"></div>
+    <div class="login-hint">
+      <strong>डेमो लॉगिन:</strong><br>
+      फ़ोन: <code>+919812345670</code> · पासवर्ड: <code>patient123</code><br>
+      या <code>+919812345672</code> / <code>patient123</code>
+    </div>
+  </div>
+  <script>
+    // Register service worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    }
+    const form = document.getElementById('login-form');
+    const errEl = document.getElementById('error');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      errEl.textContent = '';
+      const fd = new FormData(form);
+      try {
+        const r = await fetch('/api/patient/auth/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phoneOrEmail: fd.get('phoneOrEmail'), password: fd.get('password') }),
+        });
+        const j = await r.json();
+        if (!r.ok) { errEl.textContent = j.error?.message || 'लॉगिन विफल'; return; }
+        window.location.href = '/patient/home';
+      } catch (e) { errEl.textContent = 'नेटवर्क त्रुटि'; }
+    };
+    // Language toggle
+    let hi = true;
+    document.getElementById('lang-btn').onclick = () => {
+      hi = !hi;
+      document.documentElement.lang = hi ? 'hi' : 'en';
+      document.querySelectorAll('[data-hi]').forEach(el => {
+        el.textContent = hi ? el.dataset.hi : el.dataset.en;
+      });
+      document.getElementById('lang-btn').textContent = hi ? 'EN' : 'हिं';
+    };
+  </script>
+</body>
+</html>

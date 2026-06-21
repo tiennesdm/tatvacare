@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#6366f1" />
+  <title>टेलीमेडिसिन · तत्वकेयर</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    body { background: #0f172a; color: white; min-height: 100vh; }
+    .tele-container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .tele-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 0 16px; }
+    .tele-header h1 { margin: 0; font-size: 22px; }
+    .video-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .video-tile {
+      background: #1e293b; border-radius: 12px; aspect-ratio: 16/9;
+      position: relative; overflow: hidden; display: flex;
+      align-items: center; justify-content: center;
+    }
+    .video-tile video { width: 100%; height: 100%; object-fit: cover; }
+    .video-tile.local video { transform: scaleX(-1); }
+    .video-tile .placeholder {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: #94a3b8; font-size: 14px;
+    }
+    .video-tile .label {
+      position: absolute; top: 8px; left: 8px;
+      background: rgba(0,0,0,0.5); padding: 4px 10px;
+      border-radius: 8px; font-size: 12px;
+    }
+    .controls {
+      display: flex; gap: 12px; justify-content: center;
+      padding: 16px; background: #1e293b; border-radius: 12px;
+      margin-bottom: 16px;
+    }
+    .ctl-btn {
+      width: 56px; height: 56px; border-radius: 50%; border: none;
+      background: #334155; color: white; cursor: pointer;
+      font-size: 22px;
+    }
+    .ctl-btn.end { background: #ef4444; }
+    .ctl-btn:hover { background: #475569; }
+    .ctl-btn.end:hover { background: #dc2626; }
+    .chat-panel {
+      background: #1e293b; border-radius: 12px;
+      padding: 12px; height: 280px; display: flex;
+      flex-direction: column;
+    }
+    .chat-msgs { flex: 1; overflow-y: auto; margin-bottom: 8px; }
+    .chat-msg { padding: 6px 10px; margin: 4px 0; border-radius: 8px; max-width: 70%; font-size: 13px; }
+    .chat-msg.doctor { background: #6366f1; color: white; margin-left: auto; }
+    .chat-msg.patient { background: #334155; color: white; }
+    .chat-input { display: flex; gap: 8px; }
+    .chat-input input {
+      flex: 1; padding: 8px; border-radius: 8px; border: 1px solid #475569;
+      background: #0f172a; color: white; font-family: inherit;
+    }
+    .chat-input button {
+      padding: 8px 16px; border-radius: 8px;
+      background: #6366f1; color: white; border: none; cursor: pointer;
+    }
+    .start-screen { text-align: center; padding: 60px 20px; }
+    .start-screen h1 { font-size: 32px; margin-bottom: 12px; }
+    .start-screen p { color: #94a3b8; margin-bottom: 24px; }
+    .start-btn {
+      padding: 16px 32px; border-radius: 30px; background: #6366f1;
+      color: white; border: none; cursor: pointer; font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="tele-container">
+    <div class="tele-header">
+      <a href="/patient/home" style="color:white;text-decoration:none;font-size:20px;">←</a>
+      <h1>📞 टेलीमेडिसिन विज़िट</h1>
+      <div id="conn-status" style="font-size:12px;color:#94a3b8;">IDLE</div>
+    </div>
+
+    <div id="start-screen" class="start-screen">
+      <h1>वीडियो कॉल शुरू करें</h1>
+      <p>अपने डॉक्टर से जुड़ने के लिए तैयार हैं?</p>
+      <button class="start-btn" id="start-btn">📹 कॉल शुरू करें</button>
+    </div>
+
+    <div id="call-screen" style="display:none;">
+      <div class="video-grid">
+        <div class="video-tile local">
+          <video id="local-video" autoplay muted playsinline></video>
+          <div class="placeholder" id="local-placeholder">
+            <div style="font-size:48px;">📹</div>
+            <div>आपका कैमरा</div>
+          </div>
+          <div class="label">आप</div>
+        </div>
+        <div class="video-tile remote">
+          <video id="remote-video" autoplay playsinline></video>
+          <div class="placeholder" id="remote-placeholder">
+            <div style="font-size:48px;">👨‍⚕️</div>
+            <div>डॉक्टर का कैमरा</div>
+            <div style="font-size:11px;margin-top:4px;">(डेमो — लोकल पूर्वावलोकन)</div>
+          </div>
+          <div class="label">डॉक्टर</div>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="ctl-btn" id="mute-btn" title="म्यूट">🎤</button>
+        <button class="ctl-btn" id="cam-btn" title="कैमरा">📹</button>
+        <button class="ctl-btn end" id="end-btn" title="समाप्त">📞</button>
+      </div>
+      <div class="chat-panel">
+        <div class="chat-msgs" id="chat-msgs">
+          <div style="text-align:center;color:#94a3b8;font-size:12px;">कॉल शुरू होने पर यहाँ संदेश भेजें</div>
+        </div>
+        <div class="chat-input">
+          <input type="text" id="chat-input" placeholder="संदेश लिखें…" />
+          <button id="chat-send">भेजें</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let localStream = null;
+    let pc = null;
+    let isMuted = false, isCamOff = false;
+    let demoSessionId = 'tele-p-001';
+
+    document.getElementById('start-btn').onclick = async () => {
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('call-screen').style.display = 'block';
+      document.getElementById('conn-status').textContent = 'CONNECTING…';
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById('local-video').srcObject = localStream;
+        document.getElementById('local-placeholder').style.display = 'none';
+        // For demo: simulate remote by showing a placeholder or applying a filter to local
+        document.getElementById('remote-video').srcObject = localStream;  // echo back for demo
+        document.getElementById('remote-placeholder').style.display = 'none';
+        document.getElementById('conn-status').textContent = 'CONNECTED';
+        // Setup WebRTC peer connection (will be in 'connecting' until remote answers)
+        pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        // In a real app, signaling would go through /api/telemedicine/sessions/:id/signal
+        // For demo we just show the local video as the "remote"
+      } catch (e) {
+        document.getElementById('conn-status').textContent = 'PERMISSION DENIED';
+        document.getElementById('local-placeholder').innerHTML = '<div style="font-size:48px;">🚫</div><div>' + e.message + '</div>';
+      }
+    };
+
+    document.getElementById('mute-btn').onclick = () => {
+      if (!localStream) return;
+      isMuted = !isMuted;
+      localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+      document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🎤';
+    };
+    document.getElementById('cam-btn').onclick = () => {
+      if (!localStream) return;
+      isCamOff = !isCamOff;
+      localStream.getVideoTracks().forEach(t => t.enabled = !isCamOff);
+      document.getElementById('cam-btn').textContent = isCamOff ? '🎬' : '📹';
+    };
+    document.getElementById('end-btn').onclick = () => {
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      if (pc) pc.close();
+      document.getElementById('conn-status').textContent = 'ENDED';
+      document.getElementById('call-screen').style.display = 'none';
+      document.getElementById('start-screen').style.display = 'block';
+      // Post end to backend
+      fetch(`/api/telemedicine/sessions/${demoSessionId}/end`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: 'Patient ended call.' }),
+      }).catch(() => {});
+    };
+
+    function addChatMsg(body, kind) {
+      const c = document.getElementById('chat-msgs');
+      const first = c.querySelector('div');
+      if (first && first.textContent.includes('कॉल शुरू')) c.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = 'chat-msg ' + kind;
+      div.textContent = body;
+      c.appendChild(div);
+      c.scrollTop = c.scrollHeight;
+    }
+
+    document.getElementById('chat-send').onclick = async () => {
+      const i = document.getElementById('chat-input');
+      const body = i.value.trim();
+      if (!body) return;
+      i.value = '';
+      addChatMsg(body, 'doctor');  // patient's own message
+      // Send to backend
+      try {
+        await fetch(`/api/telemedicine/sessions/${demoSessionId}/messages`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body }),
+        });
+        // Simulate doctor reply after 2s
+        setTimeout(() => addChatMsg('धन्यवाद। मैंने आपका संदेश देख लिया है।', 'patient'), 2000);
+      } catch {}
+    };
+    document.getElementById('chat-input').onkeypress = (e) => {
+      if (e.key === 'Enter') document.getElementById('chat-send').click();
+    };
+  </script>
+</body>
+</html>

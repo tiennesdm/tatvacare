@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Audit Log · TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .audit-row {
+      background: var(--bg-card); padding: 12px;
+      border-radius: var(--r-md); margin-bottom: 6px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .audit-row .head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .audit-row .ts { color: var(--text-secondary); font-family: ui-monospace, monospace; font-size: 11px; }
+    .audit-row pre { background: var(--bg-base); padding: 8px; border-radius: 4px; margin: 6px 0 0; font-size: 11px; overflow-x: auto; }
+    .audit-filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .audit-filters input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-base); color: var(--text-primary); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-host"></div>
+  <div id="modal-host"></div>
+  <main class="content">
+    <div class="topbar">
+      <h1>🔍 Audit Log</h1>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost" onclick="loadAll()">🔄 Refresh</button>
+      </div>
+    </div>
+    <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+      Every create/update/delete/sign/login action is recorded. Required for DISHA/HIPAA-style compliance audits.
+    </div>
+    <div class="audit-filters">
+      <input type="text" id="filter-resource" placeholder="Resource (e.g. prescription)" />
+      <input type="text" id="filter-id" placeholder="Resource ID" />
+      <input type="number" id="filter-limit" value="100" placeholder="Limit" />
+      <button class="btn btn-primary" onclick="loadAll()">Apply</button>
+    </div>
+    <div id="audit-list">Loading…</div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('audit');
+      window.loadAll = loadAll;
+      loadAll();
+    })();
+
+    async function loadAll() {
+      const params = new URLSearchParams();
+      const rk = document.getElementById('filter-resource').value;
+      const ri = document.getElementById('filter-id').value;
+      const li = document.getElementById('filter-limit').value;
+      if (rk) params.set('resource_kind', rk);
+      if (ri) params.set('resource_id', ri);
+      if (li) params.set('limit', li);
+      const r = await fetch('/api/audit?' + params);
+      const j = await r.json();
+      const list = document.getElementById('audit-list');
+      if (!j.entries?.length) { list.innerHTML = '<div class="empty">कोई ऑडिट नहीं / No audit entries</div>'; return; }
+      list.innerHTML = j.entries.map(e => `
+        <div class="audit-row">
+          <div class="head">
+            <span class="ts">${formatTs(e.ts)}</span>
+            <span class="badge">${escapeHtml(e.actor_kind || '')}</span>
+            <span><strong>${escapeHtml(e.action || '')}</strong> ${escapeHtml(e.resource_kind || '')} <code style="font-size:11px;">${escapeHtml(e.resource_id || '').slice(0, 16)}</code></span>
+            <span style="color:var(--text-secondary);font-size:11px;">${escapeHtml(e.actor_id || '')}</span>
+          </div>
+          ${e.diff_json ? `<pre>${escapeHtml(typeof e.diff_json === 'string' ? e.diff_json : JSON.stringify(e.diff_json, null, 2))}</pre>` : ''}
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function formatTs(s) { if (!s) return '—'; try { return new Date(s).toLocaleString(); } catch { return s; } }
+  </script>
+</body>
+</html>

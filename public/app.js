@@ -112,6 +112,11 @@ function renderSidebar(active) {
       <a href="/dashboard/inbox" class="nav-link ${active === 'inbox' ? 'active' : ''}" id="nav-inbox">${ICONS.inbox}<span>Inbox</span><span class="badge" id="inbox-count" style="display:none">0</span></a>
       <a href="/dashboard/drugs" class="nav-link ${active === 'drugs' ? 'active' : ''}">${ICONS.drugs}<span>Drug DB</span></a>
       <a href="/dashboard/formulary" class="nav-link ${active === 'formulary' ? 'active' : ''}">${ICONS.drugs}<span>Drug Monographs</span></a>
+      <div class="nav-section">Care Ops</div>
+      <a href="/dashboard/analytics" class="nav-link ${active === 'analytics' ? 'active' : ''}">${ICONS.dashboard}<span>Analytics</span></a>
+      <a href="/dashboard/reminders" class="nav-link ${active === 'reminders' ? 'active' : ''}">${ICONS.inbox}<span>Reminders</span></a>
+      <a href="/dashboard/telemedicine" class="nav-link ${active === 'telemedicine' ? 'active' : ''}">📞<span>Tele-health</span></a>
+      <a href="/dashboard/audit" class="nav-link ${active === 'audit' ? 'active' : ''}">🔍<span>Audit Log</span></a>
       <div class="nav-section">AI Assistant <span class="ai-badge">βeta</span></div>
       <a href="/ai" class="nav-link ${active === 'ai' ? 'active' : ''}" id="nav-ai">${ICONS.dashboard}<span>AI Hub</span></a>
       <div class="user-card" id="user-card">
