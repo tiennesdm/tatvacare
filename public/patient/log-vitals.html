@@ -32,6 +32,29 @@
       font-size: 16px; font-family: inherit; box-sizing: border-box;
     }
     .field input:focus { outline: none; border-color: var(--primary); }
+    .field-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+    }
+    .field-grid .field-row {
+      background: #f9fafb; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: 10px;
+    }
+    .field-grid .field-row label {
+      font-size: 12px; color: var(--text-secondary); font-weight: 600;
+      display: block; margin-bottom: 4px;
+    }
+    .field-grid .field-row .with-unit {
+      display: flex; align-items: center; gap: 6px;
+    }
+    .field-grid .field-row input {
+      flex: 1; min-width: 0; padding: 8px 10px; border: none;
+      background: white; border-radius: 6px; font-size: 18px; font-weight: 700;
+    }
+    .field-grid .field-row .unit {
+      font-size: 11px; color: var(--text-secondary); min-width: 28px;
+    }
+    .field-grid .field-row input:focus { outline: 2px solid var(--primary); outline-offset: -2px; }
+    @media (max-width: 380px) { .field-grid { grid-template-columns: 1fr; } }
     .status-msg { padding: 12px; border-radius: 8px; margin-top: 12px; font-size: 14px; }
     .status-msg.ok { background: #d1fae5; color: #065f46; }
     .status-msg.warn { background: #fef3c7; color: #92400e; }
@@ -49,25 +72,47 @@
     </div>
   </div>
   <div class="log-card">
-    <div class="metric-tabs">
-      <div class="metric-tab active" data-metric="systolic">रक्तचाप (ऊपरी)</div>
-      <div class="metric-tab" data-metric="diastolic">रक्तचाप (नीचे)</div>
-      <div class="metric-tab" data-metric="pulse">नाड़ी</div>
-      <div class="metric-tab" data-metric="glucose_fasting">खाली पेट शुगर</div>
-      <div class="metric-tab" data-metric="glucose_pp">भोजन के बाद शुगर</div>
-      <div class="metric-tab" data-metric="weight_kg">वज़न</div>
-      <div class="metric-tab" data-metric="temp_c">तापमान</div>
-      <div class="metric-tab" data-metric="spo2">SpO2</div>
+    <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+      एक बार में कई रीडिंग दर्ज करें — केवल जो आपने मापी हैं भरें, बाकी खाली छोड़ दें।
     </div>
 
     <form id="log-form">
-      <input type="hidden" name="metric" id="metric" value="systolic" />
-      <div class="field">
-        <label id="value-label">रक्तचाप (mmHg)</label>
-        <input type="number" name="value" id="value" required step="0.1" inputmode="decimal"
-               style="font-size:32px;font-weight:700;padding:16px;text-align:center;" placeholder="—" />
+      <div class="field-grid">
+        <div class="field-row">
+          <label>रक्तचाप (ऊपरी) · systolic</label>
+          <div class="with-unit"><input type="number" name="systolic" data-metric="systolic" data-unit="mmHg" step="1" inputmode="decimal" placeholder="—" /><span class="unit">mmHg</span></div>
+        </div>
+        <div class="field-row">
+          <label>रक्तचाप (नीचे) · diastolic</label>
+          <div class="with-unit"><input type="number" name="diastolic" data-metric="diastolic" data-unit="mmHg" step="1" inputmode="decimal" placeholder="—" /><span class="unit">mmHg</span></div>
+        </div>
+        <div class="field-row">
+          <label>नाड़ी · pulse</label>
+          <div class="with-unit"><input type="number" name="pulse" data-metric="pulse" data-unit="bpm" step="1" inputmode="decimal" placeholder="—" /><span class="unit">bpm</span></div>
+        </div>
+        <div class="field-row">
+          <label>खाली पेट शुगर · fasting</label>
+          <div class="with-unit"><input type="number" name="glucose_fasting" data-metric="glucose_fasting" data-unit="mg/dL" step="1" inputmode="decimal" placeholder="—" /><span class="unit">mg/dL</span></div>
+        </div>
+        <div class="field-row">
+          <label>भोजन के बाद शुगर · pp</label>
+          <div class="with-unit"><input type="number" name="glucose_pp" data-metric="glucose_pp" data-unit="mg/dL" step="1" inputmode="decimal" placeholder="—" /><span class="unit">mg/dL</span></div>
+        </div>
+        <div class="field-row">
+          <label>वज़न · weight</label>
+          <div class="with-unit"><input type="number" name="weight_kg" data-metric="weight_kg" data-unit="kg" step="0.1" inputmode="decimal" placeholder="—" /><span class="unit">kg</span></div>
+        </div>
+        <div class="field-row">
+          <label>तापमान · temperature</label>
+          <div class="with-unit"><input type="number" name="temp_c" data-metric="temp_c" data-unit="°C" step="0.1" inputmode="decimal" placeholder="—" /><span class="unit">°C</span></div>
+        </div>
+        <div class="field-row">
+          <label>SpO2 · oxygen</label>
+          <div class="with-unit"><input type="number" name="spo2" data-metric="spo2" data-unit="%" step="1" inputmode="decimal" placeholder="—" /><span class="unit">%</span></div>
+        </div>
       </div>
-      <div class="field">
+
+      <div class="field" style="margin-top:18px;">
         <label>नोट (वैकल्पिक)</label>
         <textarea name="notes" id="notes" rows="2" placeholder="जैसे: सुबह की दवाई के बाद"></textarea>
       </div>
@@ -93,39 +138,40 @@
       temp_c: { label: 'तापमान', unit: '°C' },
       spo2: { label: 'SpO2', unit: '%' },
     };
-    let current = 'systolic';
-    document.querySelectorAll('.metric-tab').forEach(t => {
-      t.onclick = () => {
-        document.querySelectorAll('.metric-tab').forEach(x => x.classList.remove('active'));
-        t.classList.add('active');
-        current = t.dataset.metric;
-        document.getElementById('metric').value = current;
-        document.getElementById('value-label').textContent = METRICS[current].label + ' (' + METRICS[current].unit + ')';
-        document.getElementById('value').value = '';
-        document.getElementById('value').placeholder = '';
-        document.getElementById('status').innerHTML = '';
-      };
-    });
     document.getElementById('log-form').onsubmit = async (e) => {
       e.preventDefault();
-      const v = parseFloat(document.getElementById('value').value);
-      if (!isFinite(v)) return;
-      const unit = METRICS[current].unit;
       const notes = document.getElementById('notes').value;
+      // Build a readings[] array from every non-empty input that has a
+      // data-metric attribute. Patients usually measure BP + glucose +
+      // weight all in one morning session, so the form is now a single
+      // submit covering all 8 metrics instead of tab-switching.
+      const readings = Array.from(document.querySelectorAll('input[data-metric]'))
+        .map(el => ({
+          metric: el.dataset.metric,
+          value: el.value.trim(),
+          unit: el.dataset.unit,
+          notes,
+        }))
+        .filter(r => r.value !== '');
+      if (readings.length === 0) {
+        document.getElementById('status').innerHTML = '<div class="status-msg warn">कम से कम एक रीडिंग भरें</div>';
+        return;
+      }
       try {
         const r = await fetch('/api/patient/vitals', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ metric: current, value: v, unit, notes }),
+          body: JSON.stringify({ readings }),
         });
         const j = await r.json();
         if (!r.ok) throw new Error(j.error?.message || 'failed');
-        const flagged = j.flagged;
-        const msg = flagged === 'high' ? '<div class="status-msg warn">⚠️ यह मान सामान्य से अधिक है — कृपया डॉक्टर से संपर्क करें।</div>'
-                    : flagged === 'low' ? '<div class="status-msg warn">⚠️ यह मान सामान्य से कम है — कृपया डॉक्टर से संपर्क करें।</div>'
-                    : '<div class="status-msg ok">✅ रीडिंग सफलतापूर्वक सहेजी गई!</div>';
+        const saved = j.readings || [j];
+        const flagged = saved.filter(x => x.flagged).length;
+        const msg = flagged > 0
+          ? `<div class="status-msg warn">⚠️ ${saved.length} रीडिंग सहेजी गईं — ${flagged} सामान्य सीमा से बाहर। कृपया डॉक्टर से संपर्क करें।</div>`
+          : `<div class="status-msg ok">✅ ${saved.length} रीडिंग${saved.length === 1 ? '' : 'ें'} सफलतापूर्वक सहेजी गई${saved.length === 1 ? '!' : 'ईं!'}</div>`;
         document.getElementById('status').innerHTML = msg;
-        document.getElementById('value').value = '';
-        document.getElementById('notes').value = '';
+        // Clear all metric inputs but keep notes for follow-up entries.
+        document.querySelectorAll('input[data-metric]').forEach(el => { el.value = ''; });
         loadRecent();
       } catch (err) {
         document.getElementById('status').innerHTML = '<div class="status-msg err">त्रुटि: ' + err.message + '</div>';

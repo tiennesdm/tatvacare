@@ -6,9 +6,10 @@
     "lib": "lib"
   },
   "scripts": {
-    "test": "node ../tests/getPatientVitalsLog.test.mjs && node ../tests/phase1-layout.test.mjs",
+    "test": "node ../tests/getPatientVitalsLog.test.mjs && node ../tests/phase1-layout.test.mjs && node ../tests/phase1-log-vitals.test.mjs",
     "test:vitals": "node ../tests/getPatientVitalsLog.test.mjs",
-    "test:layout": "node ../tests/phase1-layout.test.mjs"
+    "test:layout": "node ../tests/phase1-layout.test.mjs",
+    "test:log-vitals": "node ../tests/phase1-log-vitals.test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -578,24 +578,45 @@ app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
 
 app.post('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
-  const { metric, value, unit, notes } = req.body || {};
-  if (!metric || value === undefined) return errRes(res, 'metric + value required');
-  const log_id = 'pvl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const numValue = parseFloat(value);
-  // Auto-flag abnormal values
-  let flagged = '';
-  if (metric === 'systolic' && (numValue >= 180 || numValue < 90)) flagged = numValue >= 180 ? 'high' : 'low';
-  if (metric === 'diastolic' && (numValue >= 110 || numValue < 50)) flagged = numValue >= 110 ? 'high' : 'low';
-  if (metric === 'glucose_fasting' && (numValue >= 180 || numValue < 60)) flagged = numValue >= 180 ? 'high' : 'low';
-  if (metric === 'glucose_pp' && (numValue >= 250 || numValue < 60)) flagged = numValue >= 250 ? 'high' : 'low';
+  const body = req.body || {};
+  // Phase-1 fix (Bug 4): accept either a single reading
+  //   { metric, value, unit, notes }   (legacy single-metric form)
+  // or a bulk reading
+  //   { readings: [{ metric, value, unit, notes }, ...], notes }
+  // so chronic-care patients can log BP + glucose + weight + SpO2 in
+  // one submit instead of tab-switching between metrics.
+  const readings = Array.isArray(body.readings)
+    ? body.readings
+    : (body.metric && body.value !== undefined ? [{ metric: body.metric, value: body.value, unit: body.unit, notes: body.notes }] : []);
+  if (readings.length === 0) return errRes(res, 'metric + value (or readings[]) required');
   try {
-    await pool.query(
-      `INSERT INTO patient_vitals_log (log_id, patient_id, metric, value, unit, recorded_at, device, notes, flagged)
-       VALUES ('${log_id}', '${pid}', '${metric.replace(/'/g, "''")}', ${numValue}, '${(unit || '').replace(/'/g, "''")}', '${ts}', 'manual', '${(notes || '').replace(/'/g, "''")}', '${flagged}')`
-    );
-    await audit(pool, req, { actor_kind: 'patient', actor_id: pid, action: 'create', resource_kind: 'patient_vitals_log', resource_id: log_id, diff_json: { metric, value: numValue, flagged } });
-    jsonRes(res, { log_id, metric, value: numValue, flagged }, 201);
+    const results = [];
+    for (const r of readings) {
+      const { metric, value, unit, notes } = r || {};
+      if (!metric || value === undefined || value === null || value === '') continue;
+      const numValue = parseFloat(value);
+      if (!isFinite(numValue)) continue;
+      const log_id = 'pvl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      // Auto-flag abnormal values
+      let flagged = '';
+      if (metric === 'systolic' && (numValue >= 180 || numValue < 90)) flagged = numValue >= 180 ? 'high' : 'low';
+      if (metric === 'diastolic' && (numValue >= 110 || numValue < 50)) flagged = numValue >= 110 ? 'high' : 'low';
+      if (metric === 'glucose_fasting' && (numValue >= 180 || numValue < 60)) flagged = numValue >= 180 ? 'high' : 'low';
+      if (metric === 'glucose_pp' && (numValue >= 250 || numValue < 60)) flagged = numValue >= 250 ? 'high' : 'low';
+      await pool.query(
+        `INSERT INTO patient_vitals_log (log_id, patient_id, metric, value, unit, recorded_at, device, notes, flagged)
+         VALUES ('${log_id}', '${pid}', '${metric.replace(/'/g, "''")}', ${numValue}, '${(unit || '').replace(/'/g, "''")}', '${ts}', 'manual', '${(notes || '').replace(/'/g, "''")}', '${flagged}')`
+      );
+      await audit(pool, req, { actor_kind: 'patient', actor_id: pid, action: 'create', resource_kind: 'patient_vitals_log', resource_id: log_id, diff_json: { metric, value: numValue, flagged } });
+      results.push({ log_id, metric, value: numValue, unit, flagged });
+    }
+    if (results.length === 0) return errRes(res, 'no valid readings provided');
+    // Backwards-compat: single-reading calls get the old flat response shape.
+    if (!Array.isArray(body.readings)) {
+      return jsonRes(res, { ...results[0], count: 1 }, 201);
+    }
+    jsonRes(res, { count: results.length, readings: results }, 201);
   } catch (e) { errRes(res, e.message, 500); }
 });
 
