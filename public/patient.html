@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Patient — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><a href="/dashboard">Dashboard</a> / <a href="/dashboard/patients">Patients</a> / <strong id="crumb-name">Loading…</strong></div>
+        <div class="actions">
+          <button class="btn btn-sm btn-secondary" id="add-vitals-btn">+ Vitals</button>
+          <a class="btn btn-sm" id="new-rx-link">+ New Rx</a>
+        </div>
+      </div>
+      <div class="content">
+        <div id="patient-header" class="patient-header">
+          <div class="avatar" id="ph-avatar">?</div>
+          <div class="info">
+            <div class="name" id="ph-name">Loading…</div>
+            <div class="meta" id="ph-meta"></div>
+          </div>
+          <div class="actions" id="ph-actions"></div>
+        </div>
+
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-tab="overview">Overview</button>
+          <button class="tab" data-tab="vitals">Vitals</button>
+          <button class="tab" data-tab="prescriptions">Prescriptions <span class="badge neutral" id="rx-count-tab">0</span></button>
+          <button class="tab" data-tab="notes">Notes</button>
+        </div>
+
+        <div id="tab-overview" class="tab-panel">
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start">
+            <div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">Active problems</div></div>
+                <div id="problems"></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">Vitals trend</div><div class="card-subtitle">Last 6 months</div></div>
+                <div class="vitals-chart">
+                  <div class="chart-header">
+                    <div class="chart-title">BP &amp; weight</div>
+                  </div>
+                  <canvas id="vitals-chart-canvas"></canvas>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">Allergies</div></div>
+                <div id="allergies"></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">Quick vitals (latest)</div></div>
+                <div id="latest-vitals"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="tab-vitals" class="tab-panel" style="display:none">
+          <div class="card">
+            <div class="card-header"><div><div class="card-title">Vitals history</div><div class="card-subtitle">All recorded measurements</div></div></div>
+            <div id="vitals-list"><div class="skeleton text" style="height:200px"></div></div>
+          </div>
+        </div>
+
+        <div id="tab-prescriptions" class="tab-panel" style="display:none">
+          <div class="card">
+            <div class="card-header"><div><div class="card-title">Prescriptions</div></div><a class="btn btn-sm" id="new-rx-link-2">+ New Rx</a></div>
+            <div id="rx-list"><div class="skeleton text" style="height:100px"></div></div>
+          </div>
+        </div>
+
+        <div id="tab-notes" class="tab-panel" style="display:none">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">Notes & timeline</div>
+                <div class="card-subtitle">Clinical notes, follow-ups, phone calls</div>
+              </div>
+              <button class="btn btn-sm" id="add-note-btn">+ New note</button>
+            </div>
+            <div id="notes-list"><div class="skeleton text" style="height:60px"></div></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    const patientId = window.location.pathname.split('/').pop();
+    let chartInstance = null;
+    let me = null;
+
+    async function loadChart(vitals) {
+      const ctx = document.getElementById('vitals-chart-canvas');
+      if (chartInstance) chartInstance.destroy();
+      const bp = vitals.filter(v => v.bp_systolic).map(v => ({ x: v.recorded_at, sys: v.bp_systolic, dia: v.bp_diastolic }));
+      const wt = vitals.filter(v => v.weight_kg).map(v => ({ x: v.recorded_at, y: v.weight_kg }));
+      const labels = [...new Set([...bp.map(p => p.x), ...wt.map(p => p.x)])].sort();
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels.map(l => new Date(l).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })),
+          datasets: [
+            { label: 'Systolic BP', data: bp.map(p => p.sys), borderColor: '#e23838', backgroundColor: 'rgba(226,56,56,0.1)', tension: 0.3, yAxisID: 'y', spanGaps: true },
+            { label: 'Diastolic BP', data: bp.map(p => p.dia), borderColor: '#f59f00', backgroundColor: 'rgba(245,159,0,0.1)', tension: 0.3, yAxisID: 'y', spanGaps: true, borderDash: [4, 3] },
+            { label: 'Weight (kg)', data: wt.map(p => p.y), borderColor: '#3460f4', backgroundColor: 'rgba(52,96,244,0.1)', tension: 0.3, yAxisID: 'y1', spanGaps: true }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            y: { type: 'linear', position: 'left', title: { display: true, text: 'BP (mmHg)' }, min: 50, max: 200 },
+            y1: { type: 'linear', position: 'right', title: { display: true, text: 'Weight (kg)' }, min: 50, max: 150, grid: { drawOnChartArea: false } }
+          },
+          plugins: { legend: { position: 'bottom' } }
+        }
+      });
+    }
+
+    function vitalsSummary(vitals) {
+      const last = vitals[vitals.length - 1] || {};
+      return [
+        { label: 'BP', value: last.bp_systolic && last.bp_diastolic ? `${last.bp_systolic}/${last.bp_diastolic}` : '—' },
+        { label: 'Pulse', value: last.pulse ? `${last.pulse} bpm` : '—' },
+        { label: 'Weight', value: last.weight_kg ? `${last.weight_kg} kg` : '—' },
+        { label: 'Glucose (F)', value: last.glucose_fasting ? `${last.glucose_fasting} mg/dL` : '—' },
+        { label: 'HbA1c', value: last.hba1c ? `${last.hba1c}%` : '—' },
+        { label: 'SpO2', value: last.spo2 ? `${last.spo2}%` : '—' },
+      ];
+    }
+
+    async function loadVitalsTab() {
+      const { vitals } = await TatvaCare.API.get('/api/patients/' + patientId + '/vitals');
+      const list = document.getElementById('vitals-list');
+      if (vitals.length === 0) {
+        list.innerHTML = '<div class="empty"><div class="icon">📊</div><div class="title">No vitals recorded</div><div class="desc">Click "+ Vitals" above to add a measurement</div></div>';
+        return;
+      }
+      list.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Date</th><th>BP</th><th>Pulse</th><th>Temp</th><th>SpO2</th><th>Weight</th><th>Glucose F/PP</th><th>HbA1c</th><th>Source</th><th>Notes</th></tr></thead><tbody>' +
+        vitals.slice().reverse().map(v => `<tr>
+          <td>${TatvaCare.fmtDate(v.recorded_at)}</td>
+          <td>${v.bp_systolic ? `${v.bp_systolic}/${v.bp_diastolic}` : '—'}</td>
+          <td>${v.pulse || '—'}</td>
+          <td>${v.temp_c || '—'}</td>
+          <td>${v.spo2 || '—'}</td>
+          <td>${v.weight_kg || '—'}</td>
+          <td>${v.glucose_fasting || '—'} / ${v.glucose_pp || '—'}</td>
+          <td>${v.hba1c || '—'}</td>
+          <td><span class="badge neutral">${TatvaCare.escapeHtml(v.source || 'manual')}</span></td>
+          <td>${TatvaCare.escapeHtml(v.notes || '')}</td>
+        </tr>`).join('') + '</tbody></table></div>';
+    }
+
+    async function loadRxTab() {
+      const { prescriptions } = await TatvaCare.API.get('/api/prescriptions?patient_id=' + patientId);
+      document.getElementById('rx-count-tab').textContent = prescriptions.length;
+      const list = document.getElementById('rx-list');
+      if (prescriptions.length === 0) {
+        list.innerHTML = '<div class="empty"><div class="icon">📝</div><div class="title">No prescriptions</div><div class="desc">Click "+ New Rx" above to create one</div></div>';
+        return;
+      }
+      list.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Rx #</th><th>Date</th><th>Diagnosis</th><th>Vitals</th><th>Drugs</th><th>Advice</th></tr></thead><tbody>' +
+        prescriptions.map(r => `<tr>
+          <td><code>${TatvaCare.escapeHtml(r.rx_number)}</code></td>
+          <td>${TatvaCare.fmtDate(r.created_at)}</td>
+          <td><strong>${TatvaCare.escapeHtml(r.diagnosis_label || r.diagnosis_code || '—')}</strong></td>
+          <td>${TatvaCare.escapeHtml(r.vitals.bp || '—')}${r.vitals.pulse ? ` · ${r.vitals.pulse} bpm` : ''}</td>
+          <td>${r.rx_items?.length || (r.vitals.bp ? 0 : 0)} item${(r.rx_items?.length || 0) !== 1 ? 's' : ''}</td>
+          <td style="max-width:240px">${TatvaCare.escapeHtml(r.advice || '—')}</td>
+        </tr>`).join('') + '</tbody></table></div>';
+    }
+
+    async function addVitalsModal() {
+      const body = `
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">BP systolic</label><input id="v-bps" type="number" class="form-input" placeholder="120" /></div>
+          <div class="form-group"><label class="form-label">BP diastolic</label><input id="v-bpd" type="number" class="form-input" placeholder="80" /></div>
+        </div>
+        <div class="form-row-3">
+          <div class="form-group"><label class="form-label">Pulse</label><input id="v-pulse" type="number" class="form-input" placeholder="72" /></div>
+          <div class="form-group"><label class="form-label">Weight (kg)</label><input id="v-wt" type="number" step="0.1" class="form-input" placeholder="70" /></div>
+          <div class="form-group"><label class="form-label">SpO2 (%)</label><input id="v-spo2" type="number" class="form-input" placeholder="98" /></div>
+        </div>
+        <div class="form-row-3">
+          <div class="form-group"><label class="form-label">Glucose fasting</label><input id="v-gf" type="number" class="form-input" placeholder="100" /></div>
+          <div class="form-group"><label class="form-label">Glucose PP</label><input id="v-gpp" type="number" class="form-input" placeholder="140" /></div>
+          <div class="form-group"><label class="form-label">HbA1c (%)</label><input id="v-hba" type="number" step="0.1" class="form-input" placeholder="6.5" /></div>
+        </div>
+        <div class="form-group"><label class="form-label">Notes</label><input id="v-notes" class="form-input" placeholder="optional" /></div>
+      `;
+      const footer = `<button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button><button class="btn" id="save-vitals">Save vitals</button>`;
+      const overlay = TatvaCare.showModal('Add vitals for this patient', body, footer);
+      overlay.querySelector('#save-vitals').addEventListener('click', async () => {
+        const body = {
+          patient_id: patientId,
+          bp_systolic: document.getElementById('v-bps').value ? Number(document.getElementById('v-bps').value) : null,
+          bp_diastolic: document.getElementById('v-bpd').value ? Number(document.getElementById('v-bpd').value) : null,
+          pulse: document.getElementById('v-pulse').value ? Number(document.getElementById('v-pulse').value) : null,
+          weight_kg: document.getElementById('v-wt').value ? Number(document.getElementById('v-wt').value) : null,
+          spo2: document.getElementById('v-spo2').value ? Number(document.getElementById('v-spo2').value) : null,
+          glucose_fasting: document.getElementById('v-gf').value ? Number(document.getElementById('v-gf').value) : null,
+          glucose_pp: document.getElementById('v-gpp').value ? Number(document.getElementById('v-gpp').value) : null,
+          hba1c: document.getElementById('v-hba').value ? Number(document.getElementById('v-hba').value) : null,
+          notes: document.getElementById('v-notes').value,
+          source: 'manual',
+        };
+        try {
+          await TatvaCare.API.post('/api/vitals', body);
+          TatvaCare.showToast('Vitals saved', 'success');
+          overlay.remove();
+          init();
+        } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+      });
+    }
+
+    async function init() {
+      me = await TatvaCare.initPage('patients');
+      if (!me) return;
+      try {
+        const { patient } = await TatvaCare.API.get('/api/patients/' + patientId);
+        document.getElementById('crumb-name').textContent = patient.full_name;
+        document.getElementById('ph-name').textContent = patient.full_name;
+        document.getElementById('ph-avatar').textContent = TatvaCare.initials(patient.full_name);
+        document.getElementById('ph-meta').innerHTML = `
+          <span><strong>${patient.gender || '—'}</strong> · ${patient.dob ? TatvaCare.fmtDate(patient.dob) + ' (age ' + Math.floor((Date.now() - new Date(patient.dob)) / (365.25 * 86400000)) + ')' : 'age unknown'}</span>
+          <span><strong>${patient.phone || '—'}</strong></span>
+          <span>ABHA: <code>${patient.abha_number || '—'}</code></span>
+          <span>${patient.blood_group ? '🩸 ' + patient.blood_group : ''}</span>
+        `;
+        document.getElementById('ph-actions').innerHTML = `
+          <a class="btn btn-sm btn-secondary" href="tel:${TatvaCare.escapeHtml(patient.phone || '')}">📞 Call</a>
+          <a class="btn btn-sm btn-secondary" href="https://wa.me/${(patient.phone || '').replace(/[^\d]/g, '')}" target="_blank">💬 WhatsApp</a>
+        `;
+        // Problems
+        const pEl = document.getElementById('problems');
+        if (patient.problems.length === 0) {
+          pEl.innerHTML = '<div class="empty"><div class="icon">✓</div><div class="title">No active problems</div></div>';
+        } else {
+          pEl.innerHTML = '<div class="timeline">' + patient.problems.map(p => `
+            <div class="timeline-item">
+              <div class="time">${TatvaCare.fmtDate(p.onset_date)} · <span class="badge ${p.status === 'active' ? 'warning' : 'success'}">${p.status}</span></div>
+              <div class="title">${TatvaCare.escapeHtml(p.label)}</div>
+              <div class="desc">${p.icd10_code ? '<code>' + TatvaCare.escapeHtml(p.icd10_code) + '</code> · ' : ''}noted in chart</div>
+            </div>
+          `).join('') + '</div>';
+        }
+        // Allergies
+        const aEl = document.getElementById('allergies');
+        if (patient.allergies.length === 0) {
+          aEl.innerHTML = '<div class="empty"><div class="icon">✓</div><div class="title">No known allergies</div></div>';
+        } else {
+          aEl.innerHTML = patient.allergies.map(a => `
+            <div class="alert ${a.severity === 'severe' ? 'danger' : a.severity === 'moderate' ? 'warning' : 'info'}" style="margin-bottom:8px">
+              <div class="alert-icon">⚠️</div>
+              <div class="alert-content">
+                <div class="alert-title">${TatvaCare.escapeHtml(a.allergen)}</div>
+                <div style="font-size:0.85rem">${TatvaCare.escapeHtml(a.reaction || '—')} · <span class="badge ${a.severity === 'severe' ? 'danger' : a.severity === 'moderate' ? 'warning' : 'neutral'}">${a.severity}</span></div>
+              </div>
+            </div>
+          `).join('');
+        }
+        // Vitals
+        const { vitals } = await TatvaCare.API.get('/api/patients/' + patientId + '/vitals');
+        const lv = document.getElementById('latest-vitals');
+        const summary = vitalsSummary(vitals);
+        if (vitals.length === 0) {
+          lv.innerHTML = '<div class="empty"><div class="icon">📊</div><div class="title">No vitals yet</div></div>';
+        } else {
+          lv.innerHTML = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' + summary.map(s => `
+            <div style="background:var(--slate-50);border-radius:var(--r);padding:8px 10px">
+              <div style="font-size:0.7rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:0.04em">${s.label}</div>
+              <div style="font-weight:600;font-size:0.95rem">${s.value}</div>
+            </div>
+          `).join('') + '</div>';
+        }
+        if (vitals.length > 0) {
+          await loadChart(vitals);
+        } else {
+          document.getElementById('vitals-chart-canvas').parentElement.innerHTML = '<div class="empty"><div class="icon">📊</div><div class="title">No vitals yet</div></div>';
+        }
+        // New Rx link
+        document.getElementById('new-rx-link').href = '/dashboard/prescribe/' + patientId;
+        document.getElementById('new-rx-link-2').href = '/dashboard/prescribe/' + patientId;
+        document.getElementById('add-vitals-btn').addEventListener('click', addVitalsModal);
+        // Tabs
+        document.querySelectorAll('.tab').forEach(t => {
+          t.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+            t.classList.add('active');
+            document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+            const target = document.getElementById('tab-' + t.dataset.tab);
+            target.style.display = 'block';
+            if (t.dataset.tab === 'vitals') loadVitalsTab();
+            if (t.dataset.tab === 'prescriptions') loadRxTab();
+            if (t.dataset.tab === 'notes') loadNotesTab();
+          });
+        });
+        document.getElementById('add-note-btn').addEventListener('click', addNoteModal);
+      } catch (e) {
+        TatvaCare.showToast('Failed to load patient: ' + e.message, 'error');
+        setTimeout(() => window.location.href = '/dashboard/patients', 1500);
+      }
+    }
+    init();
+
+    // ===== NOTES TAB =====
+    async function loadNotesTab() {
+      const list = document.getElementById('notes-list');
+      try {
+        const { notes } = await TatvaCare.API.get('/api/patients/' + patientId + '/notes');
+        if (!notes || notes.length === 0) {
+          list.innerHTML = '<div class="empty"><div class="icon">📝</div><div class="title">No notes yet</div><div class="desc">Click "+ New note" to add the first clinical note</div></div>';
+          return;
+        }
+        const typeBadge = (t) => {
+          const map = { clinical: 'brand', followup: 'success', instruction: 'warning', phone_call: 'neutral' };
+          return `<span class="badge ${map[t] || 'neutral'}" style="font-size:0.7rem">${TatvaCare.escapeHtml((t || 'clinical').replace('_', ' '))}</span>`;
+        };
+        list.innerHTML = notes.map(n => `
+          <div class="task-card ${n.is_pinned ? 'urgent' : ''}" style="padding:14px;border-bottom:1px solid var(--slate-100)">
+            <div class="priority-bar" style="background:${n.is_pinned ? 'var(--brand-500)' : 'var(--slate-300)'}"></div>
+            <div class="content">
+              <div class="title" style="display:flex;align-items:center;gap:8px">
+                ${n.is_pinned ? '<span title="Pinned">📌</span>' : ''}
+                <span style="font-weight:500">${typeBadge(n.note_type)}</span>
+                <span class="muted" style="font-size:0.8125rem;font-weight:400">${TatvaCare.fmtDateTime(n.created_at)}</span>
+              </div>
+              <div style="margin-top:6px;line-height:1.5">${TatvaCare.escapeHtml(n.body)}</div>
+            </div>
+            <button class="icon-btn" onclick="deleteNote('${n.note_id}')" title="Delete note">×</button>
+          </div>`).join('');
+      } catch (e) {
+        list.innerHTML = '<div class="empty"><div class="icon">⚠️</div><div class="title">Failed to load notes</div><div class="desc">' + TatvaCare.escapeHtml(e.message) + '</div></div>';
+      }
+    }
+    async function deleteNote(noteId) {
+      if (!confirm('Delete this note?')) return;
+      try {
+        await TatvaCare.API.delete('/api/patients/' + patientId + '/notes/' + noteId);
+        TatvaCare.showToast('Note deleted', 'success');
+        loadNotesTab();
+      } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+    }
+    function addNoteModal() {
+      const body = `
+        <div class="form-group">
+          <label class="form-label">Note type</label>
+          <select id="n-type" class="form-select">
+            <option value="clinical">Clinical observation</option>
+            <option value="followup">Follow-up plan</option>
+            <option value="instruction">Standing instruction</option>
+            <option value="phone_call">Phone call</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Body <span class="req">*</span></label>
+          <textarea id="n-body" class="form-textarea" required rows="6" placeholder="e.g. Patient reports BP improving on amlodipine. Continue current dose. Follow up in 2 weeks."></textarea>
+        </div>
+        <div class="form-group" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="n-pinned" />
+          <label for="n-pinned" class="form-label" style="margin:0;cursor:pointer">📌 Pin this note to the top of the timeline</label>
+        </div>`;
+      const footer = '<button class="btn btn-secondary" data-action="close">Cancel</button><button class="btn" id="save-note-btn">Save note</button>';
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `<div class="modal"><div class="modal-header"><h3>New clinical note</h3><button class="icon-btn" data-action="close">${TatvaCare.ICONS.x}</button></div><div class="modal-body">${body}</div><div class="modal-footer">${footer}</div></div>`;
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', e => { if (e.target === overlay || e.target.dataset.action === 'close') overlay.remove(); });
+      document.getElementById('save-note-btn').addEventListener('click', async () => {
+        const body_text = document.getElementById('n-body').value.trim();
+        if (!body_text) { TatvaCare.showToast('Note body is required', 'error'); return; }
+        try {
+          await TatvaCare.API.post('/api/patients/' + patientId + '/notes', {
+            note_type: document.getElementById('n-type').value,
+            body: body_text,
+            is_pinned: document.getElementById('n-pinned').checked ? 1 : 0,
+          });
+          TatvaCare.showToast('Note saved', 'success');
+          overlay.remove();
+          loadNotesTab();
+        } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>New prescription — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><a href="/dashboard">Dashboard</a> / <strong>New prescription</strong></div>
+      </div>
+      <div class="content" style="max-width:880px">
+        <form id="rx-form">
+          <div class="card">
+            <h2 style="margin-bottom:16px">Patient</h2>
+            <div class="form-group">
+              <label class="form-label">Patient <span class="req">*</span></label>
+              <div class="autocomplete">
+                <input id="patient-search" class="form-input" placeholder="Search by name, phone, or ABHA..." />
+                <div class="autocomplete-results" id="patient-results" style="display:none"></div>
+              </div>
+              <input type="hidden" id="patient_id" required />
+              <div id="patient-selected" style="margin-top:8px"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 style="margin-bottom:16px">Diagnosis</h2>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">ICD-10 code <span class="req">*</span></label>
+                <div class="autocomplete">
+                  <input id="icd10-search" name="diagnosis_code" required class="form-input" placeholder="E11.9 or 'diabetes'" autocomplete="off" />
+                  <div class="autocomplete-results" id="icd10-results" style="display:none"></div>
+                </div>
+                <div class="form-help">Type code or diagnosis name. e.g. E11.9, I10, J45.9, "diabetes", "asthma"</div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Diagnosis label</label>
+                <input id="diagnosis-label" name="diagnosis_label" class="form-input" placeholder="Type 2 diabetes mellitus" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Chief complaint</label>
+              <input name="chief_complaint" class="form-input" placeholder="Increased thirst, fatigue" />
+            </div>
+          </div>
+
+          <div class="card">
+            <h2 style="margin-bottom:16px">Vitals (at this visit)</h2>
+            <div class="form-row-3">
+              <div class="form-group">
+                <label class="form-label">BP</label>
+                <input name="vitals_bp" class="form-input" placeholder="120/80" pattern="^\d{2,3}/\d{2,3}$" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Pulse (bpm)</label>
+                <input name="vitals_pulse" type="number" min="20" max="250" class="form-input" placeholder="72" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Weight (kg)</label>
+                <input name="vitals_weight_kg" type="number" step="0.1" min="0" max="500" class="form-input" placeholder="70" />
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2 style="margin:0">Medications</h2>
+              <button type="button" id="add-drug" class="btn btn-sm btn-secondary">+ Add drug</button>
+            </div>
+            <div id="drug-search-wrap" class="form-group" style="margin-bottom:16px">
+              <div class="autocomplete">
+                <input id="drug-search" class="form-input" placeholder="Search drug database (Amlodipine, Metformin, ...) — 57 drugs loaded" />
+                <div class="autocomplete-results" id="drug-results" style="display:none"></div>
+              </div>
+            </div>
+            <div id="rx-items"></div>
+            <div id="interaction-warnings"></div>
+          </div>
+
+          <div class="card">
+            <h2 style="margin-bottom:16px">Advice &amp; follow-up</h2>
+            <div class="form-group">
+              <label class="form-label">Advice</label>
+              <textarea name="advice" class="form-textarea" placeholder="Lifestyle changes, dietary advice, warning signs..."></textarea>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Follow-up in (days)</label>
+                <input name="followup_in_days" type="number" min="1" max="365" class="form-input" placeholder="14" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Delivery method</label>
+                <select name="delivery_method" class="form-select">
+                  <option value="app">Patient app</option>
+                  <option value="whatsapp">WhatsApp</option>
+                  <option value="sms">SMS</option>
+                  <option value="email">Email</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-lg btn-block">Sign &amp; send prescription</button>
+        </form>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    let selectedPatient = null;
+    const pathParts = window.location.pathname.split('/');
+    const prefillPatientId = pathParts[pathParts.length - 1] !== 'prescribe' ? pathParts[pathParts.length - 1] : null;
+
+    // ===== ICD-10 autocomplete =====
+    (function() {
+      const inp = document.getElementById('icd10-search');
+      const res = document.getElementById('icd10-results');
+      const labelInp = document.getElementById('diagnosis-label');
+      let timer = null;
+      let activeIdx = -1;
+      let currentCodes = [];
+      inp.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => load(inp.value), 150);
+      });
+      inp.addEventListener('keydown', (e) => {
+        const items = res.querySelectorAll('.item');
+        if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, items.length - 1); updateActive(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(activeIdx - 1, 0); updateActive(); }
+        else if (e.key === 'Enter' && activeIdx >= 0) { e.preventDefault(); pickCode(currentCodes[activeIdx]); }
+        else if (e.key === 'Escape') { res.style.display = 'none'; }
+      });
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('#icd10-search') && !e.target.closest('#icd10-results')) res.style.display = 'none';
+      });
+      function updateActive() {
+        res.querySelectorAll('.item').forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+      }
+      async function load(q) {
+        try {
+          const { codes } = await TatvaCare.API.get('/api/icd10/search?q=' + encodeURIComponent(q || ''));
+          currentCodes = codes;
+          activeIdx = -1;
+          if (codes.length === 0) { res.innerHTML = '<div class="item" style="color:var(--text-mute);cursor:default">No matches</div>'; res.style.display = 'block'; return; }
+          res.innerHTML = codes.map((c, i) => `
+            <div class="item" data-idx="${i}">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
+                <div>
+                  <span class="name" style="font-family:var(--font-mono);color:var(--brand-700);font-weight:700">${TatvaCare.escapeHtml(c.code)}</span>
+                  <span style="margin-left:8px">${TatvaCare.escapeHtml(c.label)}</span>
+                </div>
+                <span class="badge neutral" style="font-size:0.7rem;flex-shrink:0">${TatvaCare.escapeHtml(c.category)}</span>
+              </div>
+            </div>`).join('');
+          res.style.display = 'block';
+          res.querySelectorAll('.item').forEach((el, i) => el.addEventListener('click', () => pickCode(codes[i])));
+        } catch (e) { console.error(e); }
+      }
+      function pickCode(c) {
+        inp.value = c.code;
+        labelInp.value = c.label;
+        res.style.display = 'none';
+        activeIdx = -1;
+      }
+      // Initial: show top 10 common codes
+      load('');
+    })();
+
+    function addDrugRow(drug) {
+      const div = document.createElement('div');
+      div.className = 'rx-item-row';
+      div.innerHTML = `
+        <div>
+          <input value="${TatvaCare.escapeHtml(drug.name)}" data-k="drug" class="form-input" required />
+          ${drug.brand_names ? `<div style="font-size:0.75rem;color:var(--text-mute);margin-top:2px">${TatvaCare.escapeHtml(drug.brand_names.split(',')[0].trim())} · ${TatvaCare.escapeHtml(drug.category || '')}</div>` : ''}
+        </div>
+        <input value="${TatvaCare.escapeHtml(drug.strength || '')}" placeholder="Dose" data-k="dose" class="form-input" required />
+        <select data-k="frequency" class="form-select">
+          <option>OD</option><option>BD</option><option selected>TDS</option><option>QID</option>
+          <option>HS</option><option>PRN</option><option>STAT</option><option>SOS</option>
+        </select>
+        <input type="number" value="30" placeholder="Days" data-k="duration" min="1" max="365" class="form-input" required />
+        <input placeholder="Instruction" data-k="instruction" class="form-input" />
+        <button type="button" class="del-btn" onclick="this.parentElement.remove(); checkInteractions()">×</button>
+      `;
+      document.getElementById('rx-items').appendChild(div);
+    }
+
+    async function checkInteractions() {
+      const drugs = [...document.querySelectorAll('.rx-item-row [data-k=drug]')].map(el => el.value).filter(Boolean);
+      const warn = document.getElementById('interaction-warnings');
+      if (drugs.length < 2) { warn.innerHTML = ''; return; }
+      try {
+        const { interactions } = await TatvaCare.API.post('/api/drugs/check-interactions', { drugs });
+        if (interactions.length === 0) {
+          warn.innerHTML = drugs.length > 1 ? '<div class="alert success" style="margin-top:12px"><div class="alert-icon">✓</div><div class="alert-content"><div class="alert-title">No known interactions</div><div style="font-size:0.85rem">All selected drugs checked against our database</div></div></div>' : '';
+          return;
+        }
+        warn.innerHTML = interactions.map(i => `
+          <div class="interaction-warning" style="margin-top:8px">
+            <div class="icon">⚠️</div>
+            <div>
+              <div class="title">${TatvaCare.escapeHtml(i.drug_a)} ↔ ${TatvaCare.escapeHtml(i.drug_b)} · <span class="badge ${i.severity === 'contraindicated' || i.severity === 'major' ? 'danger' : i.severity === 'moderate' ? 'warning' : 'neutral'}">${i.severity}</span></div>
+              <div class="detail">${TatvaCare.escapeHtml(i.mechanism || '')}</div>
+              <div class="detail"><strong>Effect:</strong> ${TatvaCare.escapeHtml(i.clinical_effect || '')}</div>
+              <div class="detail"><strong>Action:</strong> ${TatvaCare.escapeHtml(i.recommendation || '')}</div>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) { console.error('interaction check failed:', e); }
+    }
+
+    (async () => {
+      const me = await TatvaCare.initPage('prescribe');
+      if (!me) return;
+
+      // Patient search
+      let searchTimer;
+      const showResults = (patients) => {
+        const r = document.getElementById('patient-results');
+        if (patients.length === 0) { r.style.display = 'none'; return; }
+        r.innerHTML = patients.map(p => `<div class="item" data-pid="${TatvaCare.escapeHtml(p.patient_id)}" data-name="${TatvaCare.escapeHtml(p.full_name)}" data-phone="${TatvaCare.escapeHtml(p.phone)}" data-abha="${TatvaCare.escapeHtml(p.abha_number || '')}"><div class="name">${TatvaCare.escapeHtml(p.full_name)}</div><div class="meta">${TatvaCare.escapeHtml(p.phone)} · ${TatvaCare.escapeHtml(p.abha_number || 'no ABHA')}</div></div>`).join('');
+        r.style.display = 'block';
+        r.querySelectorAll('.item').forEach(item => {
+          item.addEventListener('click', () => {
+            selectedPatient = { patient_id: item.dataset.pid, full_name: item.dataset.name, phone: item.dataset.phone, abha_number: item.dataset.abha };
+            document.getElementById('patient_id').value = selectedPatient.patient_id;
+            document.getElementById('patient-selected').innerHTML = `<div class="card" style="background:var(--brand-50);border:1px solid var(--brand-200);padding:12px"><strong>${TatvaCare.escapeHtml(selectedPatient.full_name)}</strong><br><span class="muted" style="font-size:0.875rem">${TatvaCare.escapeHtml(selectedPatient.phone)} · ${TatvaCare.escapeHtml(selectedPatient.abha_number || 'no ABHA')}</span></div>`;
+            r.style.display = 'none';
+            document.getElementById('patient-search').value = selectedPatient.full_name;
+          });
+        });
+      };
+      document.getElementById('patient-search').addEventListener('input', (e) => {
+        const q = e.target.value.trim();
+        clearTimeout(searchTimer);
+        if (q.length < 2) { document.getElementById('patient-results').style.display = 'none'; return; }
+        searchTimer = setTimeout(async () => {
+          const { patients } = await TatvaCare.API.get('/api/patients?q=' + encodeURIComponent(q));
+          showResults(patients);
+        }, 200);
+      });
+
+      // Drug search
+      const drugInput = document.getElementById('drug-search');
+      const drugResults = document.getElementById('drug-results');
+      let drugTimer;
+      drugInput.addEventListener('input', (e) => {
+        const q = e.target.value.trim();
+        clearTimeout(drugTimer);
+        if (q.length < 2) { drugResults.style.display = 'none'; return; }
+        drugTimer = setTimeout(async () => {
+          const { drugs } = await TatvaCare.API.get('/api/drugs/search?q=' + encodeURIComponent(q));
+          if (drugs.length === 0) { drugResults.style.display = 'none'; return; }
+          drugResults.innerHTML = drugs.map(d => `<div class="item" data-drug='${JSON.stringify(d).replace(/'/g, "&apos;")}'><div class="name">${TatvaCare.escapeHtml(d.name)} ${d.strength ? '· ' + TatvaCare.escapeHtml(d.strength) : ''}</div><div class="meta">${TatvaCare.escapeHtml(d.brand_names || '')} · <span class="badge ${d.rx_required ? 'warning' : 'neutral'}">${d.rx_required ? 'Rx' : 'OTC'}</span> ${d.schedule || ''}</div></div>`).join('');
+          drugResults.style.display = 'block';
+          drugResults.querySelectorAll('.item').forEach(item => {
+            item.addEventListener('click', () => {
+              const drug = JSON.parse(item.dataset.drug.replace(/&apos;/g, "'"));
+              addDrugRow(drug);
+              drugInput.value = '';
+              drugResults.style.display = 'none';
+              checkInteractions();
+            });
+          });
+        }, 200);
+      });
+      document.getElementById('add-drug').addEventListener('click', () => {
+        addDrugRow({ name: '', brand_names: '', strength: '', category: '' });
+      });
+      // Don't pre-add an empty row; let user explicitly add drugs
+
+      // Form submit
+      document.getElementById('rx-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!selectedPatient) { TatvaCare.showToast('Please select a patient', 'error'); return; }
+        const items = [...document.querySelectorAll('.rx-item-row')].map(row => {
+          const obj = {};
+          row.querySelectorAll('[data-k]').forEach(el => obj[el.dataset.k] = el.value);
+          obj.duration = Number(obj.duration);
+          return obj;
+        }).filter(it => it.drug);
+        if (items.length === 0) { TatvaCare.showToast('Add at least one medication', 'error'); return; }
+        const fd = new FormData(e.target);
+        const body = Object.fromEntries(fd.entries());
+        body.patient_id = selectedPatient.patient_id;
+        body.rx_items = items;
+        body.vitals_pulse = body.vitals_pulse ? Number(body.vitals_pulse) : null;
+        body.vitals_weight_kg = body.vitals_weight_kg ? Number(body.vitals_weight_kg) : null;
+        body.followup_in_days = body.followup_in_days ? Number(body.followup_in_days) : null;
+        const btn = e.target.querySelector('button[type=submit]');
+        btn.disabled = true; btn.textContent = 'Signing...';
+        try {
+          const { prescription } = await TatvaCare.API.post('/api/prescriptions', body);
+          // Replace form with success card showing PDF download + nav
+          const formEl = document.getElementById('rx-form');
+          formEl.outerHTML = `
+            <div class="card" style="text-align:center;padding:48px 24px">
+              <div style="font-size:3rem;margin-bottom:12px">✓</div>
+              <h2 style="margin:0 0 8px">Prescription signed</h2>
+              <p class="muted" style="margin-bottom:24px">Your prescription has been queued for delivery.</p>
+              <div style="background:var(--brand-50);border:1px solid var(--brand-200);border-radius:var(--r);padding:16px;margin:0 auto 24px;max-width:380px">
+                <div style="font-size:0.75rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:0.05em">Rx Number</div>
+                <div style="font-size:1.5rem;font-weight:700;font-family:var(--font-mono);color:var(--brand-700);margin-top:4px">${TatvaCare.escapeHtml(prescription.rx_number)}</div>
+              </div>
+              <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:24px">
+                <a class="btn" href="/api/prescriptions/${prescription.rx_id}/pdf" target="_blank" rel="noopener">📄 Open PDF</a>
+                <a class="btn btn-secondary" href="/api/prescriptions/${prescription.rx_id}/pdf" download="${prescription.rx_number}.pdf">⬇ Download PDF</a>
+              </div>
+              <a class="btn btn-ghost" href="/dashboard/patients/${selectedPatient.patient_id}">View patient chart →</a>
+            </div>`;
+        } catch (err) {
+          TatvaCare.showToast(err.message, 'error');
+          btn.disabled = false; btn.textContent = 'Sign & send prescription';
+        }
+      });
+
+      // Prefill patient
+      if (prefillPatientId) {
+        try {
+          const { patient } = await TatvaCare.API.get('/api/patients/' + prefillPatientId);
+          if (patient) {
+            selectedPatient = { patient_id: patient.patient_id, full_name: patient.full_name, phone: patient.phone, abha_number: patient.abha_number };
+            document.getElementById('patient_id').value = patient.patient_id;
+            document.getElementById('patient-search').value = patient.full_name;
+            document.getElementById('patient-selected').innerHTML = `<div class="card" style="background:var(--brand-50);border:1px solid var(--brand-200);padding:12px"><strong>${TatvaCare.escapeHtml(patient.full_name)}</strong><br><span class="muted" style="font-size:0.875rem">${TatvaCare.escapeHtml(patient.phone)} · ${TatvaCare.escapeHtml(patient.abha_number || 'no ABHA')}</span></div>`;
+          }
+        } catch {}
+      }
+    })();
+  </script>
+</body>
+</html>

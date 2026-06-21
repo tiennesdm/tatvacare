@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inbox — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><a href="/dashboard">Dashboard</a> / <strong>Inbox</strong></div>
+        <div class="actions">
+          <select id="filter" class="form-select" style="width:auto">
+            <option value="open">Open</option>
+            <option value="done">Done</option>
+            <option value="">All</option>
+          </select>
+        </div>
+      </div>
+      <div class="content">
+        <div class="card">
+          <div class="card-header">
+            <div><div class="card-title">Tasks</div><div class="card-subtitle" id="count">Loading…</div></div>
+          </div>
+          <div id="tasks"><div class="skeleton text" style="height:200px"></div></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('inbox');
+      if (!me) return;
+      async function load() {
+        const status = document.getElementById('filter').value;
+        const { tasks } = await TatvaCare.API.get('/api/tasks' + (status ? '?status=' + status : ''));
+        document.getElementById('count').textContent = tasks.length + ' task' + (tasks.length !== 1 ? 's' : '');
+        const td = document.getElementById('tasks');
+        if (tasks.length === 0) {
+          td.innerHTML = '<div class="empty"><div class="icon">✓</div><div class="title">Inbox zero</div><div class="desc">All tasks are done</div></div>';
+          return;
+        }
+        td.innerHTML = tasks.map(t => `
+          <div class="task-card ${t.priority}" data-id="${t.task_id}">
+            <div class="priority-bar"></div>
+            <div class="content">
+              <div class="title">${TatvaCare.escapeHtml(t.title)} <span class="badge ${t.type === 'lab_review' ? 'info' : t.type === 'rx_refill' ? 'warning' : 'neutral'}">${t.type.replace('_', ' ')}</span></div>
+              <div class="meta">${TatvaCare.escapeHtml(t.patient_name || '—')} · ${t.due_at ? 'due ' + TatvaCare.fmtDateTime(t.due_at) : 'no due'}</div>
+              <div style="font-size:0.85rem;color:var(--slate-600);margin-top:4px">${TatvaCare.escapeHtml(t.detail || '')}</div>
+            </div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-sm btn-secondary" data-action="dismiss" data-id="${t.task_id}">Dismiss</button>
+              <button class="btn btn-sm" data-action="complete" data-id="${t.task_id}">Mark done</button>
+            </div>
+          </div>
+        `).join('');
+        td.querySelectorAll('[data-action]').forEach(b => b.addEventListener('click', async (e) => {
+          const id = e.currentTarget.dataset.id;
+          const action = e.currentTarget.dataset.action;
+          try {
+            await TatvaCare.API.post(`/api/tasks/${id}/${action}`);
+            TatvaCare.showToast(`Task ${action}d`, 'success');
+            load();
+          } catch (err) { TatvaCare.showToast(err.message, 'error'); }
+        }));
+      }
+      document.getElementById('filter').addEventListener('change', load);
+      load();
+    })();
+  </script>
+</body>
+</html>

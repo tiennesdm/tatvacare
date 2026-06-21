@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TatvaCare — Chronic Care Platform</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body style="background: linear-gradient(135deg, var(--brand-500), var(--brand-800)); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px">
+  <div style="max-width: 1100px; width: 100%; display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center" class="hero-grid">
+    <div style="color: white">
+      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 32px">
+        <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(255,255,255,0.15); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 1.25rem">T</div>
+        <div style="font-size: 1.25rem; font-weight: 700">TatvaCare</div>
+        <span style="margin-left: auto; padding: 4px 12px; background: rgba(255,255,255,0.15); border-radius: 999px; font-size: 0.7rem; font-weight: 600">VBP · 6381</span>
+      </div>
+      <h1 style="color: white; font-size: 2.6rem; line-height: 1.15; margin-bottom: 16px">Make every day better.</h1>
+      <p style="font-size: 1.1rem; opacity: 0.9; margin-bottom: 32px; max-width: 480px">
+        ABDM-compliant EMR + chronic care platform for Indian doctors. Voice-driven prescriptions, drug-interaction checks, vitals tracking, tele-consult — all on a single multi-model database.
+      </p>
+      <div style="display: flex; gap: 24px; opacity: 0.85; font-size: 0.875rem; margin-bottom: 32px">
+        <div>✓ 10,000+ doctors</div>
+        <div>✓ 9 languages</div>
+        <div>✓ 25+ specialties</div>
+      </div>
+      <a href="/signup" class="btn" style="background: white; color: var(--brand-700)">Get started — free 7-day trial</a>
+    </div>
+    <div class="card" style="padding: 32px">
+      <h2 style="margin-bottom: 8px">Sign in</h2>
+      <p class="muted" style="margin-bottom: 24px">Welcome back. Use your phone or email.</p>
+      <form id="login-form">
+        <div class="form-group">
+          <label class="form-label">Phone or email</label>
+          <input name="phoneOrEmail" class="form-input" required placeholder="+919876500001 or you@clinic.com" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input name="password" type="password" class="form-input" required />
+        </div>
+        <button type="submit" class="btn btn-block btn-lg">Sign in</button>
+      </form>
+      <div style="text-align: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 0.875rem">
+        <span class="muted">New to TatvaCare?</span> <a href="/signup" style="font-weight: 500">Create an account</a>
+      </div>
+      <div class="alert info" style="margin-top: 20px; font-size: 0.8rem">
+        <div class="alert-icon">ℹ️</div>
+        <div class="alert-content">
+          <div class="alert-title">Demo accounts</div>
+          <div style="font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6">
+            +919876500001 / tatva123 (Dr. Priya Sharma, Cardio)<br>
+            +919876500002 / tatva123 (Dr. Rajesh Verma, GP)<br>
+            +919876500003 / tatva123 (Dr. Anjali Iyer, Paeds)
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <style>
+    @media (max-width: 800px) {
+      .hero-grid { grid-template-columns: 1fr !important; }
+    }
+  </style>
+  <script src="/static/app.js"></script>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true; btn.textContent = 'Signing in...';
+      try {
+        const { doctor } = await TatvaCare.API.post('/api/auth/login', Object.fromEntries(fd.entries()));
+        TatvaCare.showToast('Welcome ' + doctor.full_name, 'success');
+        setTimeout(() => window.location.href = '/dashboard', 500);
+      } catch (err) {
+        TatvaCare.showToast(err.message, 'error');
+        btn.disabled = false; btn.textContent = 'Sign in';
+      }
+    });
+  </script>
+</body>
+</html>

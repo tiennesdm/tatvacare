@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drug Monograph · TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .monograph-hero {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: white;
+      padding: 32px 36px;
+      border-radius: var(--r);
+      margin-bottom: 20px;
+    }
+    .monograph-hero h1 { color: white; font-size: 1.75rem; margin: 0 0 6px; }
+    .monograph-hero .sub { color: #cbd5e1; font-size: 0.95rem; }
+    .monograph-hero .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+    .monograph-hero .pill { background: rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 99px; font-size: 0.8rem; }
+    .section-title { font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-mute); margin: 24px 0 8px; }
+    .indication-card { background: var(--brand-50); border: 1px solid var(--brand-200); border-radius: var(--r); padding: 14px 16px; margin-bottom: 8px; }
+    .indication-card .code { font-family: var(--font-mono); color: var(--brand-700); font-weight: 700; font-size: 0.875rem; }
+    .search-input { width: 100%; padding: 12px 16px; font-size: 1rem; border: 1.5px solid var(--slate-300); border-radius: var(--r); }
+    .search-input:focus { outline: none; border-color: var(--brand-500); box-shadow: 0 0 0 3px var(--brand-100); }
+    .reverse-card { padding: 12px 14px; border: 1px solid var(--slate-200); border-radius: var(--r); margin-bottom: 8px; background: white; transition: 0.15s; cursor: pointer; }
+    .reverse-card:hover { border-color: var(--brand-500); transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .reverse-card .name { font-weight: 600; color: var(--brand-700); }
+    .reverse-card .class { color: var(--text-mute); font-size: 0.8125rem; }
+    .kw-tag { display: inline-block; background: var(--slate-100); padding: 4px 10px; border-radius: 99px; font-size: 0.75rem; margin-right: 6px; margin-bottom: 4px; color: var(--slate-700); }
+    .warning-box { background: #fef3c7; border: 1px solid #fcd34d; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: var(--r); margin: 12px 0; font-size: 0.875rem; }
+    .danger-box { background: #fee2e2; border: 1px solid #fca5a5; border-left: 4px solid #dc2626; padding: 12px 16px; border-radius: var(--r); margin: 12px 0; font-size: 0.875rem; }
+    .info-box { background: #dbeafe; border: 1px solid #93c5fd; border-left: 4px solid #2563eb; padding: 12px 16px; border-radius: var(--r); margin: 12px 0; font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <main class="main">
+      <div id="topbar"></div>
+      <div class="page-content">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px">
+          <div>
+            <h1 style="margin:0">Drug formulary</h1>
+            <p class="muted" style="margin:4px 0 0">110+ Indian primary-care drugs with monographs, indications, dosing, side effects, interactions, and schedule</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary" id="reverse-mode-btn">🔍 Find drug by indication</button>
+          </div>
+        </div>
+
+        <!-- SEARCH MODE (default) -->
+        <div id="search-mode">
+          <input type="text" class="search-input" id="search-input" placeholder="Search by generic name (Amlodipine, Metformin, ...), brand (Crocin, Glycomet, ...), or class" autocomplete="off">
+          <div id="search-results" style="margin-top:16px"></div>
+        </div>
+
+        <!-- REVERSE MODE: by indication -->
+        <div id="reverse-mode" style="display:none">
+          <input type="text" class="search-input" id="reverse-input" placeholder="Type an indication (diabetes, hypertension, cough, fever, migraine, ...) — get the drugs that treat it" autocomplete="off">
+          <div id="reverse-results" style="margin-top:16px"></div>
+        </div>
+
+        <!-- MONOGRAPH DISPLAY -->
+        <div id="monograph-display" style="display:none"></div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    (async function() {
+      const me = await TatvaCare.initPage('formulary');
+      if (!me) return;
+      let mode = 'search';
+      const $ = id => document.getElementById(id);
+      const esc = TatvaCare.escapeHtml;
+
+      function renderSearchResults(drugs) {
+        if (drugs.length === 0) {
+          $('search-results').innerHTML = '<div class="empty"><div class="icon">🔍</div><div class="title">No matches</div><div class="desc">Try a different name, brand, or class</div></div>';
+          return;
+        }
+        $('search-results').innerHTML = drugs.map(d => `
+          <div class="reverse-card" onclick="renderMonograph('${esc(d.name)}')">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
+              <div>
+                <div class="name">${esc(d.name)}</div>
+                <div class="class">${esc(d.brand)} · ${esc(d.class)}</div>
+              </div>
+              <span class="badge ${d.schedule === 'OTC' ? 'success' : (d.schedule === 'H1' || d.schedule === 'X' ? 'warning' : 'brand')}">${esc(d.schedule)}</span>
+            </div>
+          </div>
+        `).join('');
+      }
+
+      async function search(q) {
+        try {
+          const { drugs } = await TatvaCare.API.get('/api/formulary/search?q=' + encodeURIComponent(q));
+          renderSearchResults(drugs);
+        } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+      }
+
+      async function reverse(q) {
+        try {
+          const { drugs } = await TatvaCare.API.get('/api/formulary/for-indication?q=' + encodeURIComponent(q));
+          if (drugs.length === 0) {
+            $('reverse-results').innerHTML = '<div class="empty"><div class="icon">🔍</div><div class="title">No drugs for this indication</div><div class="desc">Try a broader term (e.g. "diabetes" instead of "Type 2 DM")</div></div>';
+            return;
+          }
+          $('reverse-results').innerHTML = `
+            <div class="info-box" style="margin-bottom:12px">
+              <strong>${drugs.length} drug${drugs.length === 1 ? '' : 's'}</strong> commonly used for "<em>${esc(q)}</em>" — click any to see full monograph
+            </div>
+            ${drugs.map(name => {
+              // Find the drug details client-side via a quick fetch
+              return `<div class="reverse-card" onclick="renderMonograph('${esc(name)}')">
+                <div class="name">${esc(name)}</div>
+                <div class="class">Click to view monograph →</div>
+              </div>`;
+            }).join('')}`;
+        } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+      }
+
+      window.renderMonograph = async function(name) {
+        try {
+          const { drug } = await TatvaCare.API.get('/api/formulary/drug/' + encodeURIComponent(name));
+          if (!drug) return;
+          $('search-mode').style.display = 'none';
+          $('reverse-mode').style.display = 'none';
+          const schedBadge = drug.schedule === 'OTC' ? 'success' : (drug.schedule === 'H1' || drug.schedule === 'X' ? 'warning' : 'brand');
+          const rxBadge = drug.rx_required ? 'warning' : 'success';
+          const pregColor = ['CONTRAINDICATED', 'avoid', 'avoid 3rd trimester'].some(p => drug.pregnancy && drug.pregnancy.toLowerCase().includes(p)) ? 'danger' : 'info';
+          $('monograph-display').style.display = 'block';
+          $('monograph-display').innerHTML = `
+            <div class="monograph-hero">
+              <h1>${esc(drug.name)}</h1>
+              <div class="sub">${esc(drug.brand)}</div>
+              <div style="margin-top:8px;color:#94a3b8;font-size:0.9rem">${esc(drug.class)}</div>
+              <div class="row">
+                <span class="pill">Schedule ${esc(drug.schedule)}</span>
+                <span class="pill">${drug.rx_required ? 'Rx required' : 'OTC available'}</span>
+                <span class="pill">Pregnancy: ${esc(drug.pregnancy)}</span>
+              </div>
+            </div>
+
+            <button class="btn btn-ghost" onclick="resetView()" style="margin-bottom:16px">← Back to formulary</button>
+
+            <div class="grid-2">
+              <div>
+                <div class="section-title">Indications</div>
+                ${drug.indications.map(i => `
+                  <div class="indication-card">
+                    <span class="code">${esc(i.icd10)}</span>  ${esc(i.label)}
+                  </div>
+                `).join('')}
+
+                <div class="section-title">Adult dose</div>
+                <div class="card" style="padding:14px">${esc(drug.adult_dose)}</div>
+
+                <div class="section-title">Mechanism</div>
+                <div class="card" style="padding:14px;line-height:1.6">${esc(drug.mechanism)}</div>
+              </div>
+              <div>
+                <div class="section-title">Common side effects</div>
+                <div class="warning-box">${esc(drug.side_effects)}</div>
+
+                <div class="section-title">Contraindications</div>
+                <div class="danger-box">${esc(drug.ci)}</div>
+
+                <div class="section-title">Pregnancy safety</div>
+                <div class="info-box">${esc(drug.pregnancy)}</div>
+
+                <div class="section-title">Key interactions</div>
+                <div class="card" style="padding:14px;line-height:1.6">${esc(drug.interactions)}</div>
+              </div>
+            </div>
+
+            ${drug.keywords && drug.keywords.length > 0 ? `
+              <div class="section-title">Search keywords</div>
+              <div>${drug.keywords.map(k => `<span class="kw-tag">${esc(k)}</span>`).join('')}</div>
+            ` : ''}
+          `;
+          window.scrollTo(0, 0);
+        } catch (e) { TatvaCare.showToast(e.message, 'error'); }
+      };
+
+      window.resetView = function() {
+        $('monograph-display').style.display = 'none';
+        if (mode === 'search') $('search-mode').style.display = 'block';
+        else $('reverse-mode').style.display = 'block';
+      };
+
+      // Wire events
+      $('search-input').addEventListener('input', debounce(e => search(e.target.value), 200));
+      $('reverse-input').addEventListener('input', debounce(e => reverse(e.target.value), 200));
+      $('reverse-mode-btn').addEventListener('click', () => {
+        mode = mode === 'search' ? 'reverse' : 'search';
+        $('reverse-mode-btn').textContent = mode === 'reverse' ? '🔍 Find drug by name' : '🔍 Find drug by indication';
+        $('monograph-display').style.display = 'none';
+        if (mode === 'search') {
+          $('search-mode').style.display = 'block';
+          $('reverse-mode').style.display = 'none';
+          search($('search-input').value);
+        } else {
+          $('search-mode').style.display = 'none';
+          $('reverse-mode').style.display = 'block';
+          reverse($('reverse-input').value);
+        }
+      });
+
+      function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+      // Initial load
+      search('');
+    })();
+  </script>
+</body>
+</html>

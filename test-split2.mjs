@@ -1,0 +1,13 @@
+import { readFileSync } from 'node:fs';
+const sql = readFileSync('/Users/shubhammehta/Downloads/tatvacare/db/migrations/001_init.sql', 'utf-8');
+console.log('--- first 100 chars ---');
+console.log(JSON.stringify(sql.slice(0, 100)));
+console.log('--- around line 25-28 ---');
+console.log(JSON.stringify(sql.slice(800, 1100)));
+console.log('--- split count ---');
+const stmts = sql.split(/;\s*\n/);
+console.log('Total chunks:', stmts.length);
+console.log('--- last 5 chars of chunk 0 ---');
+console.log(JSON.stringify(stmts[0].slice(-5)));
+console.log('--- first 50 chars of chunk 1 ---');
+console.log(JSON.stringify(stmts[1].slice(0, 50)));

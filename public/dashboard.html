@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><strong>Dashboard</strong></div>
+        <div class="actions">
+          <a href="/dashboard/prescribe" class="btn btn-sm">+ New prescription</a>
+        </div>
+      </div>
+      <div class="content">
+        <div class="stats-grid" id="stats">
+          <div class="stat-card"><div class="stat-label">Total patients</div><div class="stat-value skeleton text" style="width:50px;height:32px"></div></div>
+          <div class="stat-card success"><div class="stat-label">Total Rx</div><div class="stat-value skeleton text" style="width:50px;height:32px"></div></div>
+          <div class="stat-card warning"><div class="stat-label">Rx this month</div><div class="stat-value skeleton text" style="width:50px;height:32px"></div></div>
+          <div class="stat-card danger"><div class="stat-label">Inbox tasks</div><div class="stat-value skeleton text" style="width:50px;height:32px"></div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px;align-items:start">
+          <div>
+            <div class="card">
+              <div class="card-header">
+                <div><div class="card-title">Today's schedule</div><div class="card-subtitle">Your appointments and slots for today</div></div>
+                <a href="/dashboard/calendar" class="btn btn-ghost btn-sm">View calendar →</a>
+              </div>
+              <div id="schedule"><div class="skeleton text" style="height:60px"></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header">
+                <div><div class="card-title">Recent prescriptions</div><div class="card-subtitle">Last 5 Rx you've written</div></div>
+                <a href="/dashboard/patients" class="btn btn-ghost btn-sm">All patients →</a>
+              </div>
+              <div id="rx"><div class="skeleton text" style="height:60px"></div></div>
+            </div>
+          </div>
+          <div>
+            <div class="card">
+              <div class="card-header">
+                <div><div class="card-title">Inbox</div><div class="card-subtitle">Tasks and alerts</div></div>
+                <a href="/dashboard/inbox" class="btn btn-ghost btn-sm">All →</a>
+              </div>
+              <div id="tasks"><div class="skeleton text" style="height:60px"></div></div>
+            </div>
+            <div class="card">
+              <div class="card-header"><div class="card-title">Alerts</div></div>
+              <div id="alerts"><div class="empty"><div class="icon">✓</div><div class="title">All clear</div><div class="desc">No urgent tasks or critical vitals</div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      await TatvaCare.initPage('dashboard');
+      // Stats
+      const { stats } = await TatvaCare.API.get('/api/dashboard/stats');
+      const vals = document.querySelectorAll('#stats .stat-value');
+      vals[0].textContent = stats.total_patients; vals[0].classList.remove('skeleton');
+      vals[1].textContent = stats.total_rx; vals[1].classList.remove('skeleton');
+      vals[2].textContent = stats.rx_this_month; vals[2].classList.remove('skeleton');
+      // Today + tasks + alerts
+      const { today, tasks, alerts } = await TatvaCare.API.get('/api/dashboard/today');
+      // Inbox stat
+      vals[3].textContent = tasks.length; vals[3].classList.remove('skeleton');
+      // Schedule
+      const sched = document.getElementById('schedule');
+      if (today.length === 0) {
+        sched.innerHTML = '<div class="empty"><div class="icon">📅</div><div class="title">No appointments today</div></div>';
+      } else {
+        sched.innerHTML = today.map(s => `
+          <div class="task-card">
+            <div class="priority-bar" style="background:${s.status === 'booked' ? 'var(--brand-500)' : 'var(--slate-300)'}"></div>
+            <div class="content">
+              <div class="title">${TatvaCare.fmtTime(s.slot_time)} · ${TatvaCare.escapeHtml(s.patient_name || '(open slot)')}</div>
+              <div class="meta">${TatvaCare.escapeHtml(s.reason || s.appt_type)} · ${s.duration_min}min</div>
+            </div>
+            ${s.status === 'booked' ? '<a class="btn btn-sm btn-secondary" href="/dashboard/prescribe/' + TatvaCare.escapeHtml(s.patient_id) + '">+ Rx</a>' : ''}
+          </div>
+        `).join('');
+      }
+      // Tasks
+      const td = document.getElementById('tasks');
+      if (tasks.length === 0) {
+        td.innerHTML = '<div class="empty"><div class="icon">✓</div><div class="title">Inbox zero</div></div>';
+      } else {
+        td.innerHTML = tasks.slice(0, 5).map(t => `
+          <div class="task-card ${t.priority}">
+            <div class="priority-bar"></div>
+            <div class="content">
+              <div class="title">${TatvaCare.escapeHtml(t.title)}</div>
+              <div class="meta">${TatvaCare.escapeHtml(t.patient_name || '—')} · ${t.due_at ? 'due ' + TatvaCare.fmtDate(t.due_at) : 'no due date'}</div>
+            </div>
+          </div>
+        `).join('');
+      }
+      // Alerts
+      const ad = document.getElementById('alerts');
+      if (alerts.length === 0) {
+        ad.innerHTML = '<div class="empty"><div class="icon">✓</div><div class="title">All clear</div><div class="desc">No urgent items</div></div>';
+      } else {
+        ad.innerHTML = alerts.map(a => `
+          <div class="alert danger" style="margin-bottom:8px">
+            <div class="alert-icon">${TatvaCare.ICONS.alert}</div>
+            <div class="alert-content">
+              <div class="alert-title">${TatvaCare.escapeHtml(a.title)}</div>
+              <div style="font-size:0.85rem">${TatvaCare.escapeHtml(a.patient_name || '')} · due ${TatvaCare.fmtDate(a.due_at)}</div>
+            </div>
+          </div>
+        `).join('');
+      }
+      // Recent Rx
+      const { prescriptions } = await TatvaCare.API.get('/api/prescriptions');
+      const rd = document.getElementById('rx');
+      if (prescriptions.length === 0) {
+        rd.innerHTML = '<div class="empty"><div class="icon">📝</div><div class="title">No prescriptions yet</div><div class="desc"><a href="/dashboard/prescribe">Create your first Rx</a></div></div>';
+      } else {
+        rd.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Rx #</th><th>Patient</th><th>Diagnosis</th><th>Created</th></tr></thead><tbody>' +
+          prescriptions.slice(0, 5).map(r => `<tr><td><code>${TatvaCare.escapeHtml(r.rx_number)}</code></td><td>${TatvaCare.escapeHtml(r.patient_name)}</td><td>${TatvaCare.escapeHtml(r.diagnosis_label || r.diagnosis_code || '—')}</td><td>${TatvaCare.fmtDateTime(r.created_at)}</td></tr>`).join('') + '</tbody></table></div>';
+      }
+    })();
+  </script>
+</body>
+</html>

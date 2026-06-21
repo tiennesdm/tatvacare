@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Calendar — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><a href="/dashboard">Dashboard</a> / <strong>Calendar</strong></div>
+      </div>
+      <div class="content">
+        <div class="card">
+          <div class="card-header">
+            <div><div class="card-title">This week</div><div class="card-subtitle" id="range"></div></div>
+          </div>
+          <div id="cal"><div class="skeleton text" style="height:200px"></div></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('calendar');
+      if (!me) return;
+      const { week } = await TatvaCare.API.get('/api/schedule/week');
+      const cal = document.getElementById('cal');
+      if (week.length === 0) {
+        cal.innerHTML = '<div class="empty"><div class="icon">📅</div><div class="title">No upcoming slots</div></div>';
+        return;
+      }
+      // Group by date
+      const byDate = {};
+      week.forEach(s => {
+        const d = s.slot_date && s.slot_date !== 'NULL' ? new Date(s.slot_date).toISOString().slice(0, 10) : 'unknown';
+        (byDate[d] = byDate[d] || []).push(s);
+      });
+      const dates = Object.keys(byDate).sort();
+      document.getElementById('range').textContent = dates.length ? `${TatvaCare.fmtDate(dates[0])} — ${TatvaCare.fmtDate(dates[dates.length-1])}` : '';
+
+      cal.innerHTML = dates.map(d => {
+        const day = new Date(d);
+        const dayName = day.toLocaleDateString('en-IN', { weekday: 'long' });
+        const dateStr = day.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+        const slots = byDate[d];
+        return `
+          <div style="border-bottom:1px solid var(--border);padding:16px 0">
+            <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px">
+              <h3 style="margin:0;font-size:1rem;min-width:140px">${dayName}</h3>
+              <span class="muted">${dateStr}</span>
+              <span class="badge neutral">${slots.length} slot${slots.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div class="schedule-grid">
+              ${[9, 10, 11, 12, 13, 14, 15, 16, 17].map(h => {
+                const time = String(h).padStart(2, '0') + ':00';
+                const matching = slots.filter(s => s.slot_time && s.slot_time.startsWith(String(h).padStart(2, '0')));
+                return `
+                  <div class="schedule-time">${time}</div>
+                  <div style="display:flex;flex-direction:column;gap:4px">
+                    ${matching.length === 0 ? '<div class="schedule-slot open" style="color:var(--text-mute);font-size:0.75rem">—</div>' : matching.map(s => `
+                      <div class="schedule-slot ${s.status}">
+                        <div>
+                          <div class="time">${TatvaCare.fmtTime(s.slot_time)} - ${TatvaCare.fmtTime(String(Number(s.slot_time.split(':')[0]) + 1).padStart(2, '0') + ':00')}</div>
+                          <div class="patient">${TatvaCare.escapeHtml(s.patient_id || '(open)')}</div>
+                          <div class="reason">${TatvaCare.escapeHtml(s.reason || s.appt_type)}</div>
+                        </div>
+                      </div>
+                    `).join('')}
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }).join('');
+    })();
+  </script>
+</body>
+</html>

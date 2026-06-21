@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign up — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body style="background: var(--slate-50); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px">
+  <div style="max-width: 720px; width: 100%">
+    <div style="text-align: center; margin-bottom: 24px">
+      <a href="/" class="brand" style="color: var(--brand-600); font-weight: 700; font-size: 1.25rem; text-decoration: none">TatvaCare</a>
+      <div class="muted" style="margin-top: 4px">Create your doctor account</div>
+    </div>
+    <div class="card" style="padding: 32px">
+      <h2 style="margin-bottom: 8px">Sign up</h2>
+      <p class="muted" style="margin-bottom: 24px">Join 10,000+ doctors on TatvaCare. ABDM-compliant. Free 7-day trial.</p>
+      <form id="signup-form">
+        <div class="form-group">
+          <label class="form-label">Full name <span class="req">*</span></label>
+          <input name="full_name" class="form-input" required placeholder="Dr. Priya Sharma" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Email <span class="req">*</span></label>
+            <input name="email" type="email" class="form-input" required placeholder="priya@clinic.com" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone <span class="req">*</span></label>
+            <input name="phone" type="tel" class="form-input" required placeholder="+919876543210" pattern="^\+?\d{10,15}$" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Password <span class="req">*</span> (min 6)</label>
+            <input name="password" type="password" class="form-input" required minlength="6" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">MCI / NMC Reg No</label>
+            <input name="mci_reg_no" class="form-input" placeholder="MCI/2018/12345" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Specialties <span class="muted">(comma-separated)</span></label>
+          <input name="specialties" class="form-input" placeholder="Cardiology, Internal Medicine" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Qualifications</label>
+          <input name="qualifications" class="form-input" placeholder="MBBS, MD (Internal Medicine)" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Clinic name</label>
+          <input name="clinic_name" class="form-input" placeholder="Heart & Health Clinic" />
+        </div>
+        <div class="form-row-3">
+          <div class="form-group">
+            <label class="form-label">City</label>
+            <input name="city" class="form-input" placeholder="Mumbai" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">State</label>
+            <input name="state" class="form-input" placeholder="Maharashtra" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Pincode</label>
+            <input name="pincode" class="form-input" placeholder="400050" />
+          </div>
+        </div>
+        <button type="submit" class="btn btn-block btn-lg">Create account</button>
+      </form>
+      <div style="text-align: center; margin-top: 20px; font-size: 0.875rem">
+        <span class="muted">Already have an account?</span> <a href="/login" style="font-weight: 500">Sign in</a>
+      </div>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    document.getElementById('signup-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const body = Object.fromEntries(fd.entries());
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true; btn.textContent = 'Creating account...';
+      try {
+        const { doctor } = await TatvaCare.API.post('/api/auth/signup', body);
+        TatvaCare.showToast('Account created! Welcome ' + doctor.full_name, 'success');
+        setTimeout(() => window.location.href = '/dashboard', 800);
+      } catch (err) {
+        TatvaCare.showToast(err.message, 'error');
+        btn.disabled = false; btn.textContent = 'Create account';
+      }
+    });
+  </script>
+</body>
+</html>

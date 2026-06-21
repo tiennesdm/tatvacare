@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Drug DB — TatvaCare</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <main class="main">
+      <div class="topbar">
+        <div class="crumbs"><a href="/dashboard">Dashboard</a> / <strong>Drug database</strong></div>
+      </div>
+      <div class="content">
+        <div class="card">
+          <div class="card-header">
+            <div><div class="card-title">Indian drug database</div><div class="card-subtitle" id="count">Loading…</div></div>
+          </div>
+          <input id="search" class="form-input" placeholder="Search by drug name, brand, or category (e.g. amlodipine, statin)" style="margin-bottom:16px" />
+          <div id="list"><div class="skeleton text" style="height:200px"></div></div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+  <script>
+    (async () => {
+      const me = await TatvaCare.initPage('drugs');
+      if (!me) return;
+      async function load(q) {
+        const { drugs } = await TatvaCare.API.get('/api/drugs/search?q=' + encodeURIComponent(q || ''));
+        document.getElementById('count').textContent = drugs.length + ' drug' + (drugs.length !== 1 ? 's' : '');
+        const list = document.getElementById('list');
+        if (drugs.length === 0) {
+          list.innerHTML = '<div class="empty"><div class="icon">💊</div><div class="title">No drugs match</div></div>';
+          return;
+        }
+        list.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Name</th><th>Brands</th><th>Strength</th><th>Form</th><th>Category</th><th>Schedule</th></tr></thead><tbody>' +
+          drugs.map(d => `<tr>
+            <td><strong>${TatvaCare.escapeHtml(d.name)}</strong></td>
+            <td style="color:var(--text-mute);font-size:0.875rem">${TatvaCare.escapeHtml(d.brand_names || '—')}</td>
+            <td>${TatvaCare.escapeHtml(d.strength || '—')}</td>
+            <td>${TatvaCare.escapeHtml(d.form || '—')}</td>
+            <td><span class="badge neutral">${TatvaCare.escapeHtml(d.category || '—')}</span></td>
+            <td>${d.schedule ? '<span class="badge info">' + TatvaCare.escapeHtml(d.schedule) + '</span>' : '—'}</td>
+          </tr>`).join('') + '</tbody></table></div>';
+      }
+      let timer;
+      document.getElementById('search').addEventListener('input', e => { clearTimeout(timer); timer = setTimeout(() => load(e.target.value), 200); });
+      load('');
+    })();
+  </script>
+</body>
+</html>

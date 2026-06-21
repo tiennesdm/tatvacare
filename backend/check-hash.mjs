@@ -1,0 +1,12 @@
+import { VBPPool } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/vbp.mjs';
+import { createHash } from 'node:crypto';
+const pool = new VBPPool('127.0.0.1', 6381, 1);
+const r1 = await pool.query(`SELECT doctor_id FROM doctors WHERE phone = '+919876500001' LIMIT 1`);
+console.log('without is_active:', r1.rows);
+const r2 = await pool.query(`SELECT doctor_id, is_active FROM doctors WHERE phone = '+919876500001' LIMIT 1`);
+console.log('with is_active column:', r2.rows);
+const r3 = await pool.query(`SELECT doctor_id FROM doctors WHERE phone = '+919876500001' AND is_active = 1`);
+console.log('with is_active=1:', r3.rows);
+const r4 = await pool.query(`SELECT doctor_id FROM doctors WHERE phone = '+919876500001' AND is_active = '1'`);
+console.log('with is_active="1":', r4.rows);
+process.exit(0);
