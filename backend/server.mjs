@@ -567,7 +567,7 @@ app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
     const appts = (await clinical.getPatientAppointments(pool, pid)).map(r => ({
       appointment_id: r[0], doctor_name: r[1], scheduled_at: r[2], status: r[3],
     }));
-    const vitals = await clinical.getPatientVitals(pool, pid);
+    const vitals = await clinical.getPatientVitalsLog(pool, pid);
     const reminders = (await remindersLib.getRemindersForPatient(pool, pid)).map(r => ({
       reminder_id: r[0], kind: r[1], title: r[2], body: r[3],
       schedule_type: r[4], schedule_at: r[5], channel: r[6], status: r[7],

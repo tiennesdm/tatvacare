@@ -6,7 +6,9 @@
     "lib": "lib"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node ../tests/getPatientVitalsLog.test.mjs && node ../tests/phase1-layout.test.mjs",
+    "test:vitals": "node ../tests/getPatientVitalsLog.test.mjs",
+    "test:layout": "node ../tests/phase1-layout.test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -281,6 +281,32 @@ export async function getPatientVitals(pool, patientId) {
   return r.rows.map(row => [row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]]);
 }
 
+// Phase-1 fix: the patient portal home template renders each vitals
+// record as {metric, value, unit, recorded_at, flagged, notes}. The
+// aggregated `vitals` table (one row per date) doesn't match that shape
+// and was rendering literal `undefined` next to vitals on the home page.
+// Read from the granular `patient_vitals_log` table (written by
+// /api/patient/vitals POST) instead.
+export async function getPatientVitalsLog(pool, patientId) {
+  const safe = String(patientId).replace(/'/g, "''");
+  const r = await pool.query(
+    `SELECT log_id, metric, value, unit, recorded_at, flagged, notes
+     FROM patient_vitals_log
+     WHERE patient_id = '${safe}'
+     ORDER BY recorded_at DESC
+     LIMIT 200`
+  );
+  return r.rows.map(row => ({
+    log_id: row[0],
+    metric: row[1],
+    value: row[2],
+    unit: row[3],
+    recorded_at: row[4],
+    flagged: row[5],
+    notes: row[6],
+  }));
+}
+
 export async function listAllPrescriptions(pool, opts = {}) {
   const limit = opts.limit || 200;
   const r = await pool.query(
