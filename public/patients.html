@@ -39,14 +39,14 @@
         }
         list.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Name</th><th>ABHA</th><th>Phone</th><th>Gender</th><th>City</th><th>Last visit</th><th>Rx</th><th></th></tr></thead><tbody>' +
           patients.map(p => `<tr>
-            <td><a href="/dashboard/patients/${TatvaCare.escapeHtml(p.patient_id)}" style="font-weight:600"><strong>${TatvaCare.escapeHtml(p.full_name)}</strong></a></td>
+            <td><a href="/dashboard/patient/${TatvaCare.escapeHtml(p.patient_id)}" style="font-weight:600"><strong>${TatvaCare.escapeHtml(p.full_name)}</strong></a></td>
             <td><code style="font-size:0.8rem">${TatvaCare.escapeHtml(p.abha_number || '—')}</code></td>
             <td>${TatvaCare.escapeHtml(p.phone)}</td>
             <td>${TatvaCare.escapeHtml(p.gender || '—')}</td>
             <td>${TatvaCare.escapeHtml(p.city || '—')}</td>
             <td>${TatvaCare.fmtDate(p.last_visit)}</td>
             <td><span class="badge info">${p.rx_count || 0}</span></td>
-            <td style="text-align:right"><a class="btn btn-sm btn-secondary" href="/dashboard/patients/${TatvaCare.escapeHtml(p.patient_id)}">Open</a> <a class="btn btn-sm" href="/dashboard/prescribe/${TatvaCare.escapeHtml(p.patient_id)}">+ Rx</a></td>
+            <td style="text-align:right"><a class="btn btn-sm btn-secondary" href="/dashboard/patient/${TatvaCare.escapeHtml(p.patient_id)}">Open</a> <a class="btn btn-sm" href="/dashboard/prescribe/${TatvaCare.escapeHtml(p.patient_id)}">+ Rx</a></td>
           </tr>`).join('') + '</tbody></table></div>';
       }
       let timer;
