@@ -24,15 +24,58 @@ const ICONS = {
   check:     SVG('<polyline points="20 6 9 17 4 12"/>'),
 };
 
+// CSRF helper — read a cookie value by name. The backend's
+// /api/patient/auth/login (and /api/auth/login) set a non-httpOnly
+// `csrf_token` cookie on success; the matching value is also returned in
+// the response body and verified against the per-session secret on every
+// state-changing request. API.req injects the value into the `x-csrf-token`
+// header below so callers can use POST/PUT/PATCH/DELETE without thinking
+// about CSRF plumbing.
+function getCookie(name) {
+  if (!name) return null;
+  // document.cookie is `name=value; name2=value2; ...`. Match on the exact
+  // name prefix and stop at `;` or end-of-string. Skip leading whitespace.
+  const re = new RegExp('(?:^|;\\s*)' + name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '=([^;]*)');
+  const m = document.cookie.match(re);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// One-shot console.warn the first time a state-changing call goes out
+// without a csrf_token cookie. Don't spam — subsequent misses stay quiet
+// so the console stays useful for real errors.
+let _csrfMissingWarned = false;
+
+// `API.req` — fetch wrapper used by every page. Auto-attaches:
+//   - `Content-Type: application/json` (unless caller overrides)
+//   - `credentials: 'same-origin'` so cookies travel
+//   - `x-csrf-token: <csrf_token cookie value>` on non-GET methods, when the
+//     cookie is present. Missing cookie on a POST/PUT/PATCH/DELETE logs a
+//     one-time warning and proceeds — the backend will 403 csrf_invalid, which
+//     is the right signal to the caller.
 const API = {
   async req(path, opts = {}) {
-    const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) }, credentials: 'same-origin' });
+    const method = (opts.method || 'GET').toUpperCase();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const csrfToken = getCookie('csrf_token');
+      if (csrfToken) {
+        headers['x-csrf-token'] = csrfToken;
+      } else if (!_csrfMissingWarned) {
+        _csrfMissingWarned = true;
+        console.warn('[TatvaCare] csrf_token cookie missing — state-changing requests will 403. Are you logged in?');
+      }
+    }
+    const r = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error?.message || `HTTP ${r.status}`);
     return data;
   },
   get: (p) => API.req(p),
   post: (p, body) => API.req(p, { method: 'POST', body: JSON.stringify(body) }),
+  // Convenience verbs for callers that want to be explicit.
+  put: (p, body) => API.req(p, { method: 'PUT', body: JSON.stringify(body) }),
+  patch: (p, body) => API.req(p, { method: 'PATCH', body: JSON.stringify(body) }),
+  del: (p) => API.req(p, { method: 'DELETE' }),
 };
 
 function showToast(message, type = 'success', duration = 3500) {
@@ -183,4 +226,5 @@ async function initPage(active) {
 }
 
 window.TatvaCare = { API, showToast, showModal, showSkeleton, loadMe, loadInboxCount, initPage, logout,
-  fmtDate, fmtDateTime, fmtTime, escapeHtml, initials, ICONS, SVG, renderSidebar, buildTopbar };
+  fmtDate, fmtDateTime, fmtTime, escapeHtml, initials, ICONS, SVG, renderSidebar, buildTopbar,
+  getCookie };
