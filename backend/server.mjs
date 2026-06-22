@@ -186,8 +186,8 @@ app.post('/api/auth/signup', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    setCsrfCookie(res, csrfSecret);
-    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
+    const csrfToken = setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/login', async (req, res) => {
@@ -199,8 +199,8 @@ app.post('/api/auth/login', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    setCsrfCookie(res, csrfSecret);
-    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
+    const csrfToken = setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/logout', requireAuthCsrf, async (req, res) => {
@@ -613,8 +613,13 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
 
 // ============ PATIENT PORTAL ============
 const requirePatientAuth = async (req, res, next) => {
-  const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
-  const sess = await patientAuth.getPatientSession(pool, sid);
+  // Delegate to getPatientSession (helpers block) so csrfSecret is attached
+  // — requiredPatientAuthCsrf checks req.patientSession.csrfSecret to verify
+  // the double-submit token. The original inline version missed this
+  // attachment, which silently 401'd every patient POST (vitals, refill,
+  // booking, etc.) once Week-1 CSRF shipped. Fixed as part of B5 booking
+  // because that flow is the first end-to-end test of patient + CSRF.
+  const sess = await getPatientSession(req);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
   req.patientSession = sess;
   next();
@@ -631,9 +636,9 @@ app.post('/api/patient/auth/login', async (req, res) => {
     if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
     res.append('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
     const csrfSecret = bindCsrfToSession(r.session_id);
-    setCsrfCookie(res, csrfSecret);
+    const csrfToken = setCsrfCookie(res, csrfSecret);
     await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
-    jsonRes(res, { patient: r.patient, csrfToken: csrfTokenFor(csrfSecret) });
+    jsonRes(res, { patient: r.patient, csrfToken });
   } catch (e) { errRes(res, e.message, 500); }
 });
 
@@ -709,6 +714,212 @@ app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   jsonRes(res, { vitals: rows.rows.map(r => ({
     log_id: r[0], metric: r[1], value: r[2], unit: r[3], recorded_at: r[4], flagged: r[5], notes: r[6],
   })) });
+});
+
+// ============ PATIENT APPOINTMENT BOOKING (B5) ============
+// Week-2 B5 — patient self-service: list open slots → book → list own → cancel.
+// Atomicity: POST uses pool.acquire() + BEGIN/COMMIT so the conditional
+// UPDATE (slot 'open' → 'booked' with appointment_id back-link) and the
+// INSERT into appointments commit together. Conditional UPDATE returns
+// rowsAffected=0 if the slot was already taken by a concurrent booking
+// → 409 SLOT_TAKEN. The pre-flight SELECT distinguishes "slot doesn't
+// exist" (404 NOT_FOUND) from "slot exists but not open" (409).
+const apptKindOrDefault = (k) => (k === 'tele' ? 'tele' : 'in_person');
+function apptSlotDateOnly(v) {
+  // Vedadb returns DATE as 'YYYY-MM-DD' or TIMESTAMP as 'YYYY-MM-DD HH:MM:SS'
+  if (v == null) return null;
+  const s = String(v);
+  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
+}
+function apptSlotTimeOnly(v) {
+  if (v == null) return null;
+  const s = String(v);
+  // TIME may come as 'HH:MM:SS' or 'YYYY-MM-DD HH:MM:SS'
+  const m = s.match(/(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : s;
+}
+function apptCombineScheduledAt(dateVal, timeVal) {
+  // Compose 'YYYY-MM-DD HH:MM:SS+00' from slot_date + slot_time. Caller
+  // is responsible for the timezone assumption — Vedadb stores TIMESTAMPTZ
+  // and the seed slots are clinic-local (UTC+0 here for simplicity).
+  const d = apptSlotDateOnly(dateVal) || '';
+  const t = apptSlotTimeOnly(timeVal) || '00:00:00';
+  return `${d} ${t}+00`;
+}
+
+// GET /api/patient/appointment-slots?from=YYYY-MM-DD&to=YYYY-MM-DD&doctor_id=d-001
+app.get('/api/patient/appointment-slots', requirePatientAuth, async (req, res) => {
+  const { from, to, doctor_id } = req.query;
+  let q = `SELECT slot_id, doctor_id, clinic_id, slot_date, slot_time, duration_min, status
+           FROM appointment_slots WHERE status = 'open'`;
+  const esc = (v) => String(v).replace(/'/g, "''");
+  if (from) q += ` AND slot_date >= '${esc(from)}'`;
+  if (to) q += ` AND slot_date <= '${esc(to)}'`;
+  if (doctor_id) q += ` AND doctor_id = '${esc(doctor_id)}'`;
+  q += ' ORDER BY slot_date ASC, slot_time ASC LIMIT 200';
+  try {
+    const rows = await pool.query(q);
+    jsonRes(res, { slots: rows.rows.map(r => ({
+      slot_id: r[0], doctor_id: r[1], clinic_id: r[2],
+      slot_date: apptSlotDateOnly(r[3]),
+      slot_time: apptSlotTimeOnly(r[4]),
+      duration_min: parseInt(r[5], 10) || 15, status: r[6],
+    })) });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+// POST /api/patient/appointments  {slot_id, reason?, kind: 'in_person'|'tele'}
+app.post('/api/patient/appointments', requirePatientAuthCsrf, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const { slot_id, reason, kind } = req.body || {};
+  if (!slot_id) return errRes(res, 'slot_id required');
+  const safeSlot = String(slot_id).replace(/'/g, "''");
+  const safeReason = reason == null ? null : String(reason).replace(/'/g, "''");
+  const apptKind = apptKindOrDefault(kind);
+  const conn = await pool.acquire();
+  try {
+    await conn.query('BEGIN');
+    // 1. Look up slot — 404 if not found
+    const slotRes = await conn.query(
+      `SELECT slot_id, doctor_id, clinic_id, slot_date, slot_time, duration_min, status
+       FROM appointment_slots WHERE slot_id = '${safeSlot}'`
+    );
+    if (slotRes.rows.length === 0) {
+      await conn.query('ROLLBACK');
+      return errRes(res, 'slot not found', 404, 'NOT_FOUND');
+    }
+    const s = slotRes.rows[0];
+    console.log('[B5-DEBUG] slot lookup result:', JSON.stringify(s), 'status=', JSON.stringify(s[6]), 'type=', typeof s[6], 'isopen=', s[6] === 'open');
+    if (s[6] !== 'open') {
+      await conn.query('ROLLBACK');
+      return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
+    }
+    // 2. Insert appointment row first (so we have an appointment_id to
+    //    back-link to the slot in the conditional UPDATE).
+    const appointmentId = 'apt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const scheduledAt = apptCombineScheduledAt(s[3], s[4]);
+    const dur = s[5] || 15;
+    await conn.query(
+      `INSERT INTO appointments
+        (appointment_id, slot_id, patient_id, doctor_id, clinic_id, scheduled_at, duration_min, reason, kind, status, created_at, updated_at)
+       VALUES
+        ('${appointmentId}', '${safeSlot}', '${pid}', '${String(s[1]).replace(/'/g, "''")}',
+         ${s[2] ? `'${String(s[2]).replace(/'/g, "''")}'` : 'NULL'},
+         '${scheduledAt}', ${parseInt(dur, 10) || 15},
+         ${safeReason == null ? 'NULL' : `'${safeReason}'`},
+         '${apptKind}', 'booked', '${ts}', '${ts}')`
+    );
+    // 3. Conditional UPDATE — atomic guard against concurrent bookings.
+    //    If 0 rows matched, another request just took the slot. Rollback
+    //    the appointment INSERT and return 409.
+    //    Vedadb VBP quirk: r.rowsAffected is always 0 for UPDATE regardless
+    //    of actual match — parse commandTag instead ("N row(s) updated.").
+    const updRes = await conn.query(
+      `UPDATE appointment_slots SET status='booked', appointment_id='${appointmentId}'
+       WHERE slot_id = '${safeSlot}' AND status = 'open'`
+    );
+    const updMatch = (updRes.commandTag || '').match(/^(\d+)\s+row/);
+    console.log('[B5-DEBUG] update commandTag:', updRes.commandTag, 'updMatch:', updMatch && updMatch[1]);
+    if (!updMatch || parseInt(updMatch[1], 10) === 0) {
+      await conn.query('ROLLBACK');
+      return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
+    }
+    await conn.query('COMMIT');
+    await audit(pool, req, {
+      actor_kind: 'patient', actor_id: pid, action: 'create',
+      resource_kind: 'appointment', resource_id: appointmentId,
+      diff_json: { slot_id, reason: safeReason, kind: apptKind },
+    });
+    jsonRes(res, {
+      appointment_id: appointmentId,
+      slot_id: s[0], patient_id: pid, doctor_id: s[1], clinic_id: s[2],
+      scheduled_at: scheduledAt, duration_min: parseInt(dur, 10) || 15,
+      reason: safeReason, kind: apptKind, status: 'booked',
+    }, 201);
+  } catch (e) {
+    try { await conn.query('ROLLBACK'); } catch {}
+    errRes(res, e.message, 500);
+  } finally {
+    pool.release(conn);
+  }
+});
+
+// GET /api/patient/appointments  — patient's upcoming + recent
+app.get('/api/patient/appointments', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  try {
+    const rows = await pool.query(
+      `SELECT appointment_id, slot_id, patient_id, doctor_id, clinic_id,
+              scheduled_at, duration_min, reason, kind, status,
+              cancelled_at, cancel_reason, notes, created_at, updated_at
+       FROM appointments WHERE patient_id = '${pid}'
+       ORDER BY scheduled_at DESC LIMIT 100`
+    );
+    jsonRes(res, { appointments: rows.rows.map(r => ({
+      appointment_id: r[0], slot_id: r[1], patient_id: r[2], doctor_id: r[3],
+      clinic_id: r[4], scheduled_at: r[5], duration_min: parseInt(r[6], 10) || 15, reason: r[7],
+      kind: r[8], status: r[9], cancelled_at: r[10], cancel_reason: r[11],
+      notes: r[12], created_at: r[13], updated_at: r[14],
+    })) });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+// POST /api/patient/appointments/:id/cancel  {cancel_reason?}
+app.post('/api/patient/appointments/:id/cancel', requirePatientAuthCsrf, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const apptId = String(req.params.id).replace(/'/g, "''");
+  const safeReason = req.body && req.body.cancel_reason != null
+    ? String(req.body.cancel_reason).replace(/'/g, "''")
+    : null;
+  const conn = await pool.acquire();
+  try {
+    await conn.query('BEGIN');
+    // 1. Find appointment — must belong to this patient
+    const apptRes = await conn.query(
+      `SELECT appointment_id, slot_id, status FROM appointments
+       WHERE appointment_id = '${apptId}' AND patient_id = '${pid}'`
+    );
+    if (apptRes.rows.length === 0) {
+      await conn.query('ROLLBACK');
+      return errRes(res, 'appointment not found', 404, 'NOT_FOUND');
+    }
+    const appt = apptRes.rows[0];
+    if (appt[2] === 'cancelled') {
+      await conn.query('ROLLBACK');
+      return errRes(res, 'already cancelled', 409, 'ALREADY_CANCELLED');
+    }
+    const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    // 2. Mark appointment cancelled + free the slot back to 'open'.
+    //    Both UPDATEs commit together so a crash mid-cancel can't leave
+    //    the appointment cancelled but the slot still 'booked'.
+    await conn.query(
+      `UPDATE appointments SET status='cancelled', cancelled_at='${ts}',
+        cancel_reason=${safeReason == null ? 'NULL' : `'${safeReason}'`},
+        updated_at='${ts}' WHERE appointment_id = '${apptId}'`
+    );
+    if (appt[1]) {
+      await conn.query(
+        `UPDATE appointment_slots SET status='open', appointment_id=NULL
+         WHERE slot_id = '${String(appt[1]).replace(/'/g, "''")}'`
+      );
+    }
+    await conn.query('COMMIT');
+    await audit(pool, req, {
+      actor_kind: 'patient', actor_id: pid, action: 'cancel',
+      resource_kind: 'appointment', resource_id: apptId,
+      diff_json: { cancel_reason: safeReason },
+    });
+    jsonRes(res, {
+      appointment_id: apptId, slot_id: appt[1], status: 'cancelled',
+      cancelled_at: ts, cancel_reason: safeReason,
+    });
+  } catch (e) {
+    try { await conn.query('ROLLBACK'); } catch {}
+    errRes(res, e.message, 500);
+  } finally {
+    pool.release(conn);
+  }
 });
 
 // ============ REMINDERS ============
