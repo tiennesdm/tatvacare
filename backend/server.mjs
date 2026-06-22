@@ -616,6 +616,12 @@ const requirePatientAuth = async (req, res, next) => {
   const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
   const sess = await patientAuth.getPatientSession(pool, sid);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
+  // Mirror the doctor getSession wrapper (lines 98-105) — bind the per-
+  // session CSRF secret so the downstream requireCsrf middleware can verify
+  // the x-csrf-token header against the same secret bound at login time.
+  // Without this, every state-changing patient route would 401 with
+  // "no session for CSRF check" (csrf.mjs line 137-140).
+  sess.csrfSecret = lookupCsrfSecret(sid);
   req.patientSession = sess;
   next();
 };
@@ -631,9 +637,13 @@ app.post('/api/patient/auth/login', async (req, res) => {
     if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
     res.append('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
     const csrfSecret = bindCsrfToSession(r.session_id);
-    setCsrfCookie(res, csrfSecret);
+    // Use the EXACT token setCsrfCookie put in the cookie — calling
+    // csrfTokenFor() again would mint a new (timestamp-based) token that
+    // would not match the cookie, breaking the double-submit check on
+    // every subsequent POST. See csrf.mjs line 96-111 for the rationale.
+    const csrfToken = setCsrfCookie(res, csrfSecret);
     await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
-    jsonRes(res, { patient: r.patient, csrfToken: csrfTokenFor(csrfSecret) });
+    jsonRes(res, { patient: r.patient, csrfToken });
   } catch (e) { errRes(res, e.message, 500); }
 });
 
@@ -709,6 +719,188 @@ app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   jsonRes(res, { vitals: rows.rows.map(r => ({
     log_id: r[0], metric: r[1], value: r[2], unit: r[3], recorded_at: r[4], flagged: r[5], notes: r[6],
   })) });
+});
+
+// ============ MEDICATION ADHERENCE (Week 2 / B1) ============
+// Patient self-reports each scheduled dose as taken / missed / skipped.
+// Append-only log; rollups (streak, adherence_pct) are computed by the API.
+
+const ADHERENCE_STATUS = new Set(['taken', 'missed', 'skipped']);
+const ADHERENCE_SLOTS = new Set(['morning', 'afternoon', 'evening', 'night', 'custom']);
+
+app.post('/api/patient/adherence', requirePatientAuthCsrf, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const {
+    drug_name, dose, schedule_slot, scheduled_at,
+    status, taken_at, notes, rx_id,
+  } = req.body || {};
+  if (!drug_name) return errRes(res, 'drug_name required');
+  if (!schedule_slot) return errRes(res, 'schedule_slot required');
+  if (!ADHERENCE_SLOTS.has(schedule_slot)) return errRes(res, 'schedule_slot must be one of morning|afternoon|evening|night|custom');
+  if (!scheduled_at) return errRes(res, 'scheduled_at required');
+  if (!status) return errRes(res, 'status required');
+  if (!ADHERENCE_STATUS.has(status)) return errRes(res, 'status must be one of taken|missed|skipped');
+
+  const adherence_id = 'ad-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  // VBP wire needs space-separated timestamp; trim TZ for safety.
+  const scheduledStr = String(scheduled_at).slice(0, 19).replace('T', ' ');
+  const takenStr = taken_at ? String(taken_at).slice(0, 19).replace('T', ' ') : null;
+  // Engine v1 does not honor DEFAULT values at INSERT time — supply the
+  // current_timestamp explicitly (matches the pattern used by /api/reminders).
+  const createdStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    await pool.query(
+      `INSERT INTO med_adherence (adherence_id, patient_id, rx_id, drug_name, dose, schedule_slot, scheduled_at, taken_at, status, notes, created_at)
+       VALUES ('${adherence_id}', '${pid}', ${rx_id ? `'${String(rx_id).replace(/'/g, "''")}'` : 'NULL'},
+               '${String(drug_name).replace(/'/g, "''")}',
+               ${dose ? `'${String(dose).replace(/'/g, "''")}'` : 'NULL'},
+               '${schedule_slot}', '${scheduledStr}',
+               ${takenStr ? `'${takenStr}'` : 'NULL'},
+               '${status}',
+               ${notes ? `'${String(notes).replace(/'/g, "''")}'` : 'NULL'},
+               '${createdStr}')`
+    );
+    await audit(pool, req, {
+      actor_kind: 'patient', actor_id: pid, action: 'create',
+      resource_kind: 'med_adherence', resource_id: adherence_id,
+      diff_json: { drug_name, schedule_slot, scheduled_at, status },
+    });
+    jsonRes(res, {
+      adherence_id, patient_id: pid, drug_name, dose: dose || null,
+      schedule_slot, scheduled_at, taken_at: taken_at || null,
+      status, notes: notes || null, rx_id: rx_id || null,
+    }, 201);
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+// Helper: VBP returns NULL columns as the literal string 'NULL' (and Date
+// objects are also possible for TIMESTAMPTZ). Treat both as null and parse
+// valid timestamps to ISO. Anything else → null (don't crash the response).
+function vbpParseTs(v) {
+  if (v == null) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString();
+  const s = String(v).trim();
+  if (!s || s === 'NULL' || s === 'null') return null;
+  const d = new Date(s.replace(' ', 'T'));
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+app.get('/api/patient/adherence', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const { from, to, status } = req.query;
+  // Default window: last 30 days if no from/to.
+  const now = new Date();
+  const defaultFrom = new Date(now.getTime() - 30 * 86400 * 1000);
+  const fromStr = (from ? String(from) : defaultFrom.toISOString()).slice(0, 19).replace('T', ' ');
+  const toStr   = (to   ? String(to)   : now.toISOString()).slice(0, 19).replace('T', ' ');
+  const statusFilter = status && ADHERENCE_STATUS.has(status) ? `AND status = '${status}'` : '';
+  try {
+    const rows = await pool.query(
+      `SELECT adherence_id, patient_id, rx_id, drug_name, dose, schedule_slot, scheduled_at, taken_at, status, notes, created_at
+         FROM med_adherence
+        WHERE patient_id = '${pid}'
+          AND scheduled_at >= '${fromStr}'
+          AND scheduled_at <= '${toStr}'
+          ${statusFilter}
+        ORDER BY scheduled_at DESC LIMIT 500`
+    );
+    const out = rows.rows.map(r => ({
+      adherence_id: r[0], patient_id: r[1], rx_id: r[2], drug_name: r[3],
+      dose: r[4] && r[4] !== 'NULL' ? r[4] : null,
+      schedule_slot: r[5],
+      scheduled_at: vbpParseTs(r[6]),
+      taken_at: vbpParseTs(r[7]),
+      status: r[8] && r[8] !== 'NULL' ? r[8] : null,
+      notes: r[9] && r[9] !== 'NULL' ? r[9] : null,
+      created_at: vbpParseTs(r[10]),
+    }));
+
+    // Rollups: streak_days = number of consecutive days ending today where
+    // EVERY scheduled dose is 'taken' (missed/skipped resets the streak).
+    // adherence_pct = taken / (taken + missed + skipped) over the window.
+    const dayKey = (iso) => {
+      if (!iso) return null;
+      // iso is "YYYY-MM-DDTHH:MM:SS.sssZ" — date is the first 10 chars.
+      return iso.slice(0, 10);
+    };
+    const byDay = new Map();
+    for (const r of out) {
+      const k = dayKey(r.scheduled_at);
+      if (!k) continue;
+      const bucket = byDay.get(k) || { taken: 0, missed: 0, skipped: 0, any: false };
+      if (r.status === 'taken') bucket.taken++;
+      else if (r.status === 'missed') bucket.missed++;
+      else if (r.status === 'skipped') bucket.skipped++;
+      bucket.any = true;
+      byDay.set(k, bucket);
+    }
+    // Streak: walk back from today; stop at first day that is 'empty' OR has
+    // any missed/skipped.
+    let streak_days = 0;
+    const cursor = new Date(now.toISOString().slice(0, 10) + 'T00:00:00Z');
+    while (true) {
+      const k = cursor.toISOString().slice(0, 10);
+      const b = byDay.get(k);
+      if (!b || !b.any || b.missed > 0 || b.skipped > 0) break;
+      streak_days++;
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
+    }
+
+    let tTaken = 0, tMissed = 0, tSkipped = 0;
+    for (const b of byDay.values()) { tTaken += b.taken; tMissed += b.missed; tSkipped += b.skipped; }
+    const denom = tTaken + tMissed + tSkipped;
+    const adherence_pct = denom > 0 ? Math.round((tTaken / denom) * 100) : null;
+
+    jsonRes(res, {
+      rows: out,
+      streak_days,
+      adherence_pct,
+      window: { from: fromStr, to: toStr },
+      totals: { taken: tTaken, missed: tMissed, skipped: tSkipped },
+    });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.get('/api/patient/adherence/today', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  // Today 00:00 UTC → tomorrow 00:00 UTC (exclusive upper bound).
+  const now = new Date();
+  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const tomorrow = new Date(todayStart.getTime() + 86400 * 1000);
+  const fromStr = todayStart.toISOString().slice(0, 19).replace('T', ' ');
+  const toStr   = tomorrow.toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    // Pull today's med_adherence rows; LEFT-JOIN reminders on the per-patient
+    // metformin reminder id so we can fall back to its title/body when the
+    // adherence row was created without drug_name/dose.
+    const rows = await pool.query(
+      `SELECT a.adherence_id, a.patient_id, a.rx_id, a.drug_name, a.dose, a.schedule_slot,
+              a.scheduled_at, a.taken_at, a.status, a.notes,
+              r.title, r.body
+         FROM med_adherence a
+         LEFT JOIN reminders r
+           ON r.reminder_id = 'r-' || a.patient_id || '-metformin'
+          AND r.patient_id = a.patient_id
+        WHERE a.patient_id = '${pid}'
+          AND a.scheduled_at >= '${fromStr}'
+          AND a.scheduled_at <  '${toStr}'
+        ORDER BY a.scheduled_at ASC`
+    );
+    const out = rows.rows.map(r => ({
+      adherence_id: r[0], patient_id: r[1], rx_id: r[2],
+      drug_name: r[3] && r[3] !== 'NULL' ? r[3]
+                : (r[10] && r[10] !== 'NULL' ? String(r[10]).replace(/^Take\s+/i, '').replace(/\s+\d.*$/, '').trim() : null)
+                || 'Unknown',
+      dose: r[4] && r[4] !== 'NULL' ? r[4] : null,
+      schedule_slot: r[5],
+      scheduled_at: vbpParseTs(r[6]),
+      taken_at: vbpParseTs(r[7]),
+      status: r[8] && r[8] !== 'NULL' ? r[8] : 'pending',
+      notes: r[9] && r[9] !== 'NULL' ? r[9] : null,
+      reminder_title: r[10] && r[10] !== 'NULL' ? r[10] : null,
+    }));
+    jsonRes(res, { rows: out, date: todayStart.toISOString().slice(0, 10) });
+  } catch (e) { errRes(res, e.message, 500); }
 });
 
 // ============ REMINDERS ============
