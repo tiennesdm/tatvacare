@@ -17,33 +17,116 @@ import { augmentPrompt, retrieve as ragRetrieve } from '/Users/shubhammehta/Down
 import * as i18n from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/i18n.mjs';
 import * as remindersLib from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/reminders.mjs';
 
+// ============ SECURITY MIDDLEWARE (E1 rate limit, E2 helmet, E4 sanitize) ============
+import {
+  buildHelmet,
+  buildRateLimiters,
+  sanitizeMiddleware,
+  newCsrfSecret,
+  setCsrfCookie,
+  requireCsrf,
+  csrfTokenFor,
+} from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/security/index.mjs';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
 
 const app = express();
+
+// E2 — Security headers first (before everything else; helmet sets CSP, HSTS,
+// X-Frame-Options, Referrer-Policy, COOP, X-Content-Type-Options, hides
+// X-Powered-By, etc.). See lib/security/headers.mjs for per-directive rationale.
+app.use(buildHelmet());
+
+// Body parsers
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
+// E4 — Input sanitization (must run AFTER body parsers, BEFORE handlers).
+// Strips disallowed HTML from whitelisted free-text fields in req.body
+// (notes, advice, allergies, rx_instructions, body, message, title, etc.)
+// and 400s on obvious XSS payloads (<script>, javascript:, on*=).
+app.use(sanitizeMiddleware());
+
+// E1 — Rate limiters (per-route-class). In-memory MemoryStore for now;
+// swap to rate-limit-redis when we go multi-process. See
+// lib/security/rate-limit.mjs for the swap point.
+const rateLimits = buildRateLimiters();
+// Auth:    /api/auth/*           →  5 req / 15 min / IP
+// AI:      /api/ai/*             → 30 req / min / IP
+// Vitals:  POST /api/vitals      → 60 req / min / IP  (writes only)
+// Default: everything else       → 120 req / min / IP
+app.use('/api/auth', rateLimits.auth);
+app.use('/api/ai', rateLimits.ai);
+// Default limiter covers everything else under /api/* that doesn't have
+// a stricter limiter. It also runs for /api/auth/* and /api/ai/* but
+// with a wider window (120/min vs 5/15min or 30/min), so the tighter
+// per-class limit always wins. Static pages and /patient/* pages are
+// NOT rate-limited (they don't go through /api/*).
+app.use('/api', rateLimits.default);
+// vitals write limiter is applied per-route below (POST /api/vitals only).
+
 const pool = new VBPPool('127.0.0.1', 6381, 12);
+
+// ============ CSRF SECRET STORE ============
+// In-memory Map keyed by session id. Single-process Node so this is fine;
+// for multi-process / multi-host swap to Redis (see lib/security/csrf.mjs).
+// Keyed by EITHER a doctor sid OR a patient sid (they share the same
+// sessions table).
+const csrfSecrets = new Map();
+function bindCsrfToSession(sid, secret = newCsrfSecret()) {
+  csrfSecrets.set(sid, secret);
+  return secret;
+}
+function clearCsrfForSession(sid) {
+  if (sid) csrfSecrets.delete(sid);
+}
+function lookupCsrfSecret(sid) {
+  return sid ? csrfSecrets.get(sid) || null : null;
+}
 
 // ============ HELPERS ============
 async function getSession(req) {
   const sid = req.headers.cookie?.match(/sid=([^;]+)/)?.[1];
-  return sid ? auth.getSession(pool, sid) : null;
+  if (!sid) return null;
+  const sess = await auth.getSession(pool, sid);
+  if (!sess) return null;
+  // Attach CSRF secret so requireCsrf can verify without a second lookup.
+  sess.csrfSecret = lookupCsrfSecret(sid);
+  return sess;
+}
+async function getPatientSession(req) {
+  const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
+  if (!sid) return null;
+  const sess = await patientAuth.getPatientSession(pool, sid);
+  if (!sess) return null;
+  sess.csrfSecret = lookupCsrfSecret(sid);
+  return sess;
 }
 function jsonRes(res, data, status = 200) { res.status(status).json(data); }
 function errRes(res, msg, status = 400, code = 'BAD_REQUEST') { res.status(status).json({ error: { code, message: msg } }); }
 function setCookie(res, name, value, days = 7) {
-  res.setHeader('Set-Cookie', `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${days * 86400}`);
+  // Append (not setHeader) so we can stack multiple Set-Cookie headers
+  // on the same response (e.g. sid + csrf_token on /api/auth/login).
+  res.append('Set-Cookie', `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${days * 86400}`);
 }
 function clearCookie(res, name) {
-  res.setHeader('Set-Cookie', `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.append('Set-Cookie', `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 function requireAuth(req, res, next) {
   getSession(req).then(sess => {
     if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
     req.session = sess; next();
   }).catch(e => errRes(res, e.message, 500, 'SERVER_ERROR'));
+}
+// E3 — Chain requireAuth + requireCsrf for state-changing routes that need
+// a doctor session. requireAuth populates req.session (incl. csrfSecret);
+// requireCsrf then verifies the supplied token against it.
+function requireAuthCsrf(req, res, next) {
+  requireAuth(req, res, () => requireCsrf(req, res, next));
+}
+function requirePatientAuthCsrf(req, res, next) {
+  requirePatientAuth(req, res, () => requireCsrf(req, res, next));
 }
 
 // ============ FRONTEND (static) ============
@@ -101,8 +184,10 @@ app.post('/api/auth/signup', async (req, res) => {
     if (check.rows.length > 0) return errRes(res, 'email or phone already registered', 409, 'CONFLICT');
     const doctor = await auth.signupDoctor(pool, { full_name, email, phone, password, mci_reg_no, specialties, qualifications, languages, clinic_name, clinic_address, city, state, pincode });
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
+    const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    jsonRes(res, { doctor });
+    setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/login', async (req, res) => {
@@ -112,17 +197,29 @@ app.post('/api/auth/login', async (req, res) => {
     const doctor = await auth.loginDoctor(pool, phoneOrEmail, password);
     if (!doctor) return errRes(res, 'invalid credentials', 401, 'INVALID_CREDENTIALS');
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
+    const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    jsonRes(res, { doctor });
+    setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
-app.post('/api/auth/logout', async (req, res) => {
-  const sid = req.headers.cookie?.match(/sid=([^;]+)/)?.[1];
-  if (sid) await auth.destroySession(pool, sid);
+app.post('/api/auth/logout', requireAuthCsrf, async (req, res) => {
+  const sid = req.session?.session_id || req.headers.cookie?.match(/sid=([^;]+)/)?.[1];
+  if (sid) {
+    await auth.destroySession(pool, sid);
+    clearCsrfForSession(sid);
+  }
   clearCookie(res, 'sid');
+  // Clear the CSRF cookie too.
+  res.append('Set-Cookie', `csrf_token=; Path=/; SameSite=Lax; Max-Age=0`);
   jsonRes(res, { ok: true });
 });
-app.get('/api/auth/me', requireAuth, (req, res) => { jsonRes(res, { doctor: req.session }); });
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  jsonRes(res, {
+    doctor: req.session,
+    csrfToken: req.session?.csrfSecret ? csrfTokenFor(req.session.csrfSecret) : null,
+  });
+});
 
 // ============ DASHBOARD ============
 app.get('/api/dashboard/stats', requireAuth, async (req, res) => {
@@ -146,7 +243,7 @@ app.get('/api/patients', requireAuth, async (req, res) => {
     jsonRes(res, { patients });
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/patients', requireAuth, async (req, res) => {
+app.post('/api/patients', requireAuthCsrf, async (req, res) => {
   try {
     const { full_name, phone } = req.body;
     if (!full_name || !phone) return errRes(res, 'full_name and phone are required');
@@ -182,7 +279,7 @@ app.get('/api/prescriptions/:id', requireAuth, async (req, res) => {
   try { const rx = await doc.getPrescription(pool, req.params.id); if (!rx) return errRes(res, 'not found', 404); if (rx.doctor_id !== req.session.doctor_id) return errRes(res, 'forbidden', 403); jsonRes(res, { prescription: rx }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/prescriptions', requireAuth, async (req, res) => {
+app.post('/api/prescriptions', requireAuthCsrf, async (req, res) => {
   try {
     const { patient_id, rx_items, diagnosis_code } = req.body;
     if (!patient_id) return errRes(res, 'patient_id is required');
@@ -198,7 +295,7 @@ app.get('/api/drugs/search', requireAuth, async (req, res) => {
   try { const q = String(req.query.q || '').trim(); const drugs = await clinical.searchDrugs(pool, q); jsonRes(res, { drugs }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/drugs/check-interactions', requireAuth, async (req, res) => {
+app.post('/api/drugs/check-interactions', requireAuthCsrf, async (req, res) => {
   try { const drugs = req.body.drugs || []; const interactions = await clinical.checkInteractions(pool, drugs); jsonRes(res, { interactions }); }
   catch (e) { errRes(res, e.message, 500); }
 });
@@ -208,7 +305,7 @@ app.get('/api/patients/:id/vitals', requireAuth, async (req, res) => {
   try { const vitals = await clinical.listVitals(pool, req.params.id, req.query.type); jsonRes(res, { vitals }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/vitals', requireAuth, async (req, res) => {
+app.post('/api/vitals', rateLimits.vitalsWrite, requireAuthCsrf, async (req, res) => {
   try {
     if (!req.body.patient_id) return errRes(res, 'patient_id required');
     const v = await clinical.createVital(pool, { ...req.body, recorded_by: req.session.doctor_id });
@@ -221,11 +318,11 @@ app.get('/api/tasks', requireAuth, async (req, res) => {
   try { const tasks = await clinical.listTasks(pool, req.session.doctor_id, req.query.status); jsonRes(res, { tasks }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/tasks/:id/complete', requireAuth, async (req, res) => {
+app.post('/api/tasks/:id/complete', requireAuthCsrf, async (req, res) => {
   try { await clinical.completeTask(pool, req.params.id); jsonRes(res, { ok: true }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/tasks/:id/dismiss', requireAuth, async (req, res) => {
+app.post('/api/tasks/:id/dismiss', requireAuthCsrf, async (req, res) => {
   try { await clinical.dismissTask(pool, req.params.id); jsonRes(res, { ok: true }); }
   catch (e) { errRes(res, e.message, 500); }
 });
@@ -282,7 +379,7 @@ app.get('/api/patients/:id/notes', requireAuth, async (req, res) => {
     jsonRes(res, { notes });
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/patients/:id/notes', requireAuth, async (req, res) => {
+app.post('/api/patients/:id/notes', requireAuthCsrf, async (req, res) => {
   try {
     const { note_type, body, is_pinned } = req.body;
     if (!body) return errRes(res, 'body required');
@@ -293,7 +390,7 @@ app.post('/api/patients/:id/notes', requireAuth, async (req, res) => {
     jsonRes(res, { note: { note_id, patient_id: req.params.id, doctor_id: req.session.doctor_id, note_type: note_type || 'clinical', body, is_pinned: !!is_pinned, created_at: now, updated_at: now } }, 201);
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.delete('/api/patients/:pid/notes/:nid', requireAuth, async (req, res) => {
+app.delete('/api/patients/:pid/notes/:nid', requireAuthCsrf, async (req, res) => {
   try {
     await pool.query(`DELETE FROM patient_notes WHERE note_id = '${req.params.nid.replace(/'/g, "''")}' AND doctor_id = '${req.session.doctor_id}'`);
     jsonRes(res, { ok: true });
@@ -328,7 +425,7 @@ app.get('/api/health', async (req, res) => {
 const AI_URL = process.env.AI_URL || 'http://127.0.0.1:7100';
 
 // OCR
-app.post('/api/ai/ocr/prescription', requireAuth, async (req, res) => {
+app.post('/api/ai/ocr/prescription', requireAuthCsrf, async (req, res) => {
   try {
     const { image } = req.body; // base64 data URL or raw base64
     if (!image) return errRes(res, 'image required');
@@ -342,7 +439,7 @@ app.post('/api/ai/ocr/prescription', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
-app.post('/api/ai/ocr/lab-report', requireAuth, async (req, res) => {
+app.post('/api/ai/ocr/lab-report', requireAuthCsrf, async (req, res) => {
   try {
     const { image } = req.body;
     if (!image) return errRes(res, 'image required');
@@ -357,7 +454,7 @@ app.post('/api/ai/ocr/lab-report', requireAuth, async (req, res) => {
 });
 
 // NLP — extract entities / suggest ICD-10
-app.post('/api/ai/nlp/entities', requireAuth, async (req, res) => {
+app.post('/api/ai/nlp/entities', requireAuthCsrf, async (req, res) => {
   try {
     const { text } = req.body;
     const r = await fetch(`${AI_URL}/nlp/extract-entities`, {
@@ -368,7 +465,7 @@ app.post('/api/ai/nlp/entities', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
-app.post('/api/ai/nlp/icd10', requireAuth, async (req, res) => {
+app.post('/api/ai/nlp/icd10', requireAuthCsrf, async (req, res) => {
   try {
     const { text, top_k } = req.body;
     const r = await fetch(`${AI_URL}/nlp/suggest-icd10`, {
@@ -382,7 +479,7 @@ app.post('/api/ai/nlp/icd10', requireAuth, async (req, res) => {
 // Voice — proxy multipart
 import('node:buffer').then(() => {});
 
-app.post('/api/ai/voice/transcribe', requireAuth, async (req, res) => {
+app.post('/api/ai/voice/transcribe', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
     if (!ct.includes('multipart/form-data')) return errRes(res, 'multipart/form-data required');
@@ -399,7 +496,7 @@ app.post('/api/ai/voice/transcribe', requireAuth, async (req, res) => {
 });
 
 // ML — risk / anomaly / forecast
-app.post('/api/ai/ml/risk', requireAuth, async (req, res) => {
+app.post('/api/ai/ml/risk', requireAuthCsrf, async (req, res) => {
   try {
     const r = await fetch(`${AI_URL}/ml/risk`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -409,7 +506,7 @@ app.post('/api/ai/ml/risk', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
-app.post('/api/ai/ml/anomaly', requireAuth, async (req, res) => {
+app.post('/api/ai/ml/anomaly', requireAuthCsrf, async (req, res) => {
   try {
     const r = await fetch(`${AI_URL}/ml/anomaly`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -419,7 +516,7 @@ app.post('/api/ai/ml/anomaly', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
-app.post('/api/ai/ml/forecast', requireAuth, async (req, res) => {
+app.post('/api/ai/ml/forecast', requireAuthCsrf, async (req, res) => {
   try {
     const r = await fetch(`${AI_URL}/ml/forecast`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -434,7 +531,7 @@ app.post('/api/ai/ml/forecast', requireAuth, async (req, res) => {
 });
 
 // Agents
-app.post('/api/ai/agents/run', requireAuth, async (req, res) => {
+app.post('/api/ai/agents/run', requireAuthCsrf, async (req, res) => {
   try {
     const r = await fetch(`${AI_URL}/agents/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -459,7 +556,7 @@ app.get('/api/ai/agents/list', requireAuth, async (req, res) => {
 });
 
 // DL — ECG + retinopathy
-app.post('/api/ai/dl/ecg', requireAuth, async (req, res) => {
+app.post('/api/ai/dl/ecg', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
     const r = await fetch(`${AI_URL}/dl/ecg/classify`, {
@@ -469,7 +566,7 @@ app.post('/api/ai/dl/ecg', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
 });
 
-app.post('/api/ai/dl/retinopathy', requireAuth, async (req, res) => {
+app.post('/api/ai/dl/retinopathy', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
     const r = await fetch(`${AI_URL}/dl/retinopathy/screen`, {
@@ -532,15 +629,20 @@ app.post('/api/patient/auth/login', async (req, res) => {
     if (!r) return errRes(res, 'invalid credentials', 401, 'UNAUTHORIZED');
     if (r.locked) return errRes(res, `locked until ${r.until}`, 423, 'LOCKED');
     if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
-    res.setHeader('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+    res.append('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+    const csrfSecret = bindCsrfToSession(r.session_id);
+    setCsrfCookie(res, csrfSecret);
     await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
-    jsonRes(res, { patient: r.patient });
+    jsonRes(res, { patient: r.patient, csrfToken: csrfTokenFor(csrfSecret) });
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-app.post('/api/patient/auth/logout', requirePatientAuth, async (req, res) => {
-  await patientAuth.logoutPatient(pool, req.patientSession.session_id);
-  res.setHeader('Set-Cookie', `pid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+app.post('/api/patient/auth/logout', requirePatientAuthCsrf, async (req, res) => {
+  const sid = req.patientSession?.session_id;
+  await patientAuth.logoutPatient(pool, sid);
+  clearCsrfForSession(sid);
+  res.append('Set-Cookie', `pid=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.append('Set-Cookie', `csrf_token=; Path=/; SameSite=Lax; Max-Age=0`);
   jsonRes(res, { ok: true });
 });
 
@@ -576,7 +678,7 @@ app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-app.post('/api/patient/vitals', requirePatientAuth, async (req, res) => {
+app.post('/api/patient/vitals', requirePatientAuthCsrf, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
   const { metric, value, unit, notes } = req.body || {};
   if (!metric || value === undefined) return errRes(res, 'metric + value required');
@@ -625,7 +727,7 @@ app.get('/api/reminders', requireAuth, async (req, res) => {
   })) });
 });
 
-app.post('/api/reminders', requireAuth, async (req, res) => {
+app.post('/api/reminders', requireAuthCsrf, async (req, res) => {
   const { patient_id, kind, title, body, schedule_type, schedule_at, channel } = req.body || {};
   if (!patient_id || !kind || !title || !schedule_type) return errRes(res, 'patient_id, kind, title, schedule_type required');
   const reminder_id = 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -654,7 +756,7 @@ app.get('/api/reminders/deliveries', requireAuth, async (req, res) => {
 });
 
 // Fire due reminders (cron endpoint — call every minute from a scheduler)
-app.post('/api/reminders/fire-due', requireAuth, async (req, res) => {
+app.post('/api/reminders/fire-due', requireAuthCsrf, async (req, res) => {
   const fired = await remindersLib.fireDueReminders(pool);
   jsonRes(res, { fired_count: fired.length, fired });
 });
@@ -675,7 +777,7 @@ app.get('/api/telemedicine/sessions', requireAuth, async (req, res) => {
   })) });
 });
 
-app.post('/api/telemedicine/sessions', requireAuth, async (req, res) => {
+app.post('/api/telemedicine/sessions', requireAuthCsrf, async (req, res) => {
   const { patient_id, scheduled_at, channel } = req.body || {};
   if (!patient_id || !scheduled_at) return errRes(res, 'patient_id and scheduled_at required');
   const session_id = 'tele-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -690,14 +792,14 @@ app.post('/api/telemedicine/sessions', requireAuth, async (req, res) => {
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-app.post('/api/telemedicine/sessions/:id/start', requireAuth, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/start', requireAuthCsrf, async (req, res) => {
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
   await pool.query(`UPDATE tele_sessions SET status = 'active', started_at = '${ts}' WHERE session_id = '${req.params.id.replace(/'/g, "''")}'`);
   await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'start', resource_kind: 'tele_session', resource_id: req.params.id });
   jsonRes(res, { ok: true });
 });
 
-app.post('/api/telemedicine/sessions/:id/end', requireAuth, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/end', requireAuthCsrf, async (req, res) => {
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const { notes, followup_rx_id } = req.body || {};
   await pool.query(
@@ -716,7 +818,7 @@ app.get('/api/telemedicine/sessions/:id/messages', requireAuth, async (req, res)
   })) });
 });
 
-app.post('/api/telemedicine/sessions/:id/messages', requireAuth, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/messages', requireAuthCsrf, async (req, res) => {
   const { body } = req.body || {};
   if (!body) return errRes(res, 'body required');
   const message_id = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -822,7 +924,7 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 });
 
 // ============ RAG (clinical guidelines) ============
-app.post('/api/rag/query', requireAuth, async (req, res) => {
+app.post('/api/rag/query', requireAuthCsrf, async (req, res) => {
   const { query } = req.body || {};
   if (!query) return errRes(res, 'query required');
   try {
@@ -886,7 +988,7 @@ async function aiAgent(name, ctx, req) {
   try { return JSON.parse(r.text); } catch { return null; }
 }
 
-app.post('/api/ai/agents/llm', requireAuth, async (req, res) => {
+app.post('/api/ai/agents/llm', requireAuthCsrf, async (req, res) => {
   // LLM-powered version of the existing agents — proxy to Python with LLM augmentation
   const { agent, ...body } = req.body || {};
   if (!agent) return errRes(res, 'agent required');
