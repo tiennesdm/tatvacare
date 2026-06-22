@@ -199,8 +199,11 @@ app.post('/api/auth/login', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    setCsrfCookie(res, csrfSecret);
-    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
+    // Use the SAME token that setCsrfCookie put in the cookie for the body —
+    // csrfTokenFor() generates a fresh token (different salt) so the cookie
+    // and body would disagree and the double-submit check would always 403.
+    const csrfToken = setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/logout', requireAuthCsrf, async (req, res) => {
@@ -612,10 +615,18 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
 });
 
 // ============ PATIENT PORTAL ============
+// Patient auth middleware — pulls the pid cookie, validates the session row,
+// and attaches the patient profile + csrfSecret to req.patientSession. The
+// csrfSecret comes from the in-memory Map populated by patient login (see
+// /api/patient/auth/login) — without it requirePatientAuthCsrf cannot verify
+// the x-csrf-token header on subsequent POSTs. (Bug fix: earlier version
+// omitted this attachment, causing every patient POST to 401 with
+// 'no session for CSRF check'.)
 const requirePatientAuth = async (req, res, next) => {
   const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
   const sess = await patientAuth.getPatientSession(pool, sid);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
+  sess.csrfSecret = lookupCsrfSecret(sid);
   req.patientSession = sess;
   next();
 };
@@ -631,9 +642,11 @@ app.post('/api/patient/auth/login', async (req, res) => {
     if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
     res.append('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
     const csrfSecret = bindCsrfToSession(r.session_id);
-    setCsrfCookie(res, csrfSecret);
+    const csrfToken = setCsrfCookie(res, csrfSecret);
     await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
-    jsonRes(res, { patient: r.patient, csrfToken: csrfTokenFor(csrfSecret) });
+    // Same token in body as in cookie — required for the double-submit check
+    // (csrfTokenFor() would generate a different salt and break verification).
+    jsonRes(res, { patient: r.patient, csrfToken });
   } catch (e) { errRes(res, e.message, 500); }
 });
 
@@ -709,6 +722,192 @@ app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   jsonRes(res, { vitals: rows.rows.map(r => ({
     log_id: r[0], metric: r[1], value: r[2], unit: r[3], recorded_at: r[4], flagged: r[5], notes: r[6],
   })) });
+});
+
+// ============ PATIENT REFILL REQUESTS (Week 2 / B2) ============
+// Patient self-reports a medication refill need (chronic Rx). The row
+// enters with status='pending' and surfaces in the doctor's
+// /api/refill/pending inbox. The doctor then approves / rejects / marks
+// fulfilled via /api/refill/:id/decision.
+
+const ALLOWED_REFILL_URGENCY = new Set(['low', 'normal', 'high', 'urgent']);
+const ALLOWED_REFILL_DECISIONS = new Set(['approved', 'rejected', 'fulfilled']);
+// State machine: pending → approved | rejected | (approved → fulfilled).
+// Anything else is a 409 — prevents resurrecting rejected/cancelled rows
+// and prevents double-fulfilling.
+const REFILL_VALID_TRANSITIONS = {
+  approved:  new Set(['pending']),
+  rejected:  new Set(['pending']),
+  fulfilled: new Set(['pending', 'approved']),
+};
+
+app.post('/api/patient/refill', requirePatientAuthCsrf, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  const { drug_name, rx_id, current_stock, requested_qty, urgency, pharmacy, patient_notes } = req.body || {};
+  if (!drug_name) return errRes(res, 'drug_name required');
+  if (requested_qty === undefined || requested_qty === null) return errRes(res, 'requested_qty required');
+  if (urgency && !ALLOWED_REFILL_URGENCY.has(urgency)) return errRes(res, 'urgency must be one of low|normal|high|urgent');
+  const numQty = parseInt(requested_qty);
+  if (Number.isNaN(numQty) || numQty <= 0) return errRes(res, 'requested_qty must be a positive integer');
+  let numStock = null;
+  if (current_stock !== undefined && current_stock !== null && current_stock !== '') {
+    numStock = parseInt(current_stock);
+    if (Number.isNaN(numStock)) return errRes(res, 'current_stock must be an integer');
+  }
+  const request_id = 'refill-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    await pool.query(
+      `INSERT INTO refill_requests
+        (request_id, patient_id, rx_id, drug_name, current_stock, requested_qty, urgency, pharmacy,
+         status, doctor_notes, patient_notes, created_at)
+       VALUES ('${request_id}', '${pid}',
+               ${rx_id ? `'${String(rx_id).replace(/'/g, "''")}'` : 'NULL'},
+               '${String(drug_name).replace(/'/g, "''")}',
+               ${numStock === null ? 'NULL' : numStock},
+               ${numQty},
+               '${(urgency || 'normal').replace(/'/g, "''")}',
+               ${pharmacy ? `'${String(pharmacy).replace(/'/g, "''")}'` : 'NULL'},
+               'pending', NULL,
+               ${patient_notes ? `'${String(patient_notes).replace(/'/g, "''")}'` : 'NULL'},
+               '${ts}')`
+    );
+    await audit(pool, req, {
+      actor_kind: 'patient', actor_id: pid,
+      action: 'create', resource_kind: 'refill_request', resource_id: request_id,
+      diff_json: { drug_name, current_stock: numStock, requested_qty: numQty, urgency: urgency || 'normal' },
+    });
+    jsonRes(res, {
+      request_id, patient_id: pid, drug_name,
+      current_stock: numStock, requested_qty: numQty,
+      urgency: urgency || 'normal', pharmacy: pharmacy || null,
+      patient_notes: patient_notes || null,
+      status: 'pending', created_at: ts,
+    }, 201);
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.get('/api/patient/refill', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  try {
+    const rows = await pool.query(
+      `SELECT request_id, patient_id, rx_id, drug_name, current_stock, requested_qty, urgency, pharmacy,
+              status, doctor_notes, patient_notes, created_at, decided_at, decided_by
+         FROM refill_requests
+        WHERE patient_id = '${pid}'
+        ORDER BY created_at DESC LIMIT 100`
+    );
+    jsonRes(res, { requests: rows.rows.map(r => ({
+      request_id: r[0], patient_id: r[1],
+      rx_id: r[2] && r[2] !== 'NULL' ? r[2] : null,
+      drug_name: r[3],
+      current_stock: r[4] && r[4] !== 'NULL' ? parseInt(r[4]) : null,
+      requested_qty: r[5] && r[5] !== 'NULL' ? parseInt(r[5]) : null,
+      urgency: r[6], pharmacy: r[7] && r[7] !== 'NULL' ? r[7] : null,
+      status: r[8],
+      doctor_notes: r[9] && r[9] !== 'NULL' ? r[9] : null,
+      patient_notes: r[10] && r[10] !== 'NULL' ? r[10] : null,
+      created_at: r[11],
+      decided_at: r[12] && r[12] !== 'NULL' ? r[12] : null,
+      decided_by: r[13] && r[13] !== 'NULL' ? r[13] : null,
+    })) });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+// ============ DOCTOR REFILL INBOX (Week 2 / B2) ============
+// Doctor scope for /api/refill/pending is "all pending requests for the
+// logged-in doctor's clinic" — joined via patients.clinic_id → doctors.clinic_id
+// (added in 008_refill.sql; doctors.clinic_id was set in 006). Falls back
+// to "all pending" if the doctor has no clinic_id (legacy seed rows).
+//
+// Vedadb JOIN quirks:
+//   1. `p.clinic_id = '…'` (qualified column in WHERE on aliased join) errors
+//      with "column '…' not found on joined alias 'p'".
+//   2. Plain `clinic_id = 'cl-001'` equality fails even though the column
+//      visibly holds 'cl-001' — TRIM() / LIKE workarounds required.
+// Solution: comma-join + two-step filter — first fetch pending rows joined
+// to patient name/phone, then filter to the doctor's clinic in JS. Simple,
+// correct, and avoids both Vedadb quirks. Acceptable for the volume of
+// pending requests (≤200 per doctor).
+
+app.get('/api/refill/pending', requireAuth, async (req, res) => {
+  const doctor_id = req.session.doctor_id;
+  try {
+    const dr = await pool.query(
+      `SELECT clinic_id FROM doctors WHERE doctor_id = '${doctor_id.replace(/'/g, "''")}' LIMIT 1`
+    );
+    const clinicIdRaw = dr.rows[0]?.[0];
+    const clinicId = clinicIdRaw && clinicIdRaw !== 'NULL' ? clinicIdRaw : null;
+
+    // Fetch all pending (across patients) — JOIN the patient name/phone via
+    // a comma-join (Vedadb limitation: this works; qualified-WHERE doesn't).
+    const rows = await pool.query(
+      `SELECT r.request_id, r.patient_id, p.full_name AS patient_name, p.phone AS patient_phone,
+              p.clinic_id AS patient_clinic_id,
+              r.rx_id, r.drug_name, r.current_stock, r.requested_qty, r.urgency, r.pharmacy,
+              r.status, r.patient_notes, r.created_at
+         FROM refill_requests r, patients p
+        WHERE p.patient_id = r.patient_id
+          AND r.status = 'pending'
+        ORDER BY r.created_at DESC LIMIT 500`
+    );
+
+    // Filter by doctor's clinic in JS (Vedadb equality on TEXT is unreliable).
+    const requests = rows.rows
+      .map(r => ({
+        request_id: r[0], patient_id: r[1],
+        patient_name: r[2], patient_phone: r[3],
+        patient_clinic_id: r[4] && r[4] !== 'NULL' ? r[4] : null,
+        rx_id: r[5] && r[5] !== 'NULL' ? r[5] : null,
+        drug_name: r[6],
+        current_stock: r[7] && r[7] !== 'NULL' ? parseInt(r[7]) : null,
+        requested_qty: r[8] && r[8] !== 'NULL' ? parseInt(r[8]) : null,
+        urgency: r[9], pharmacy: r[10] && r[10] !== 'NULL' ? r[10] : null,
+        status: r[11],
+        patient_notes: r[12] && r[12] !== 'NULL' ? r[12] : null,
+        created_at: r[13],
+      }))
+      .filter(req2 => !clinicId || req2.patient_clinic_id === clinicId);
+
+    jsonRes(res, {
+      requests,
+      clinic_id: clinicId,
+    });
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.post('/api/refill/:id/decision', requireAuthCsrf, async (req, res) => {
+  const doctor_id = req.session.doctor_id;
+  const request_id = req.params.id;
+  const { decision, doctor_notes } = req.body || {};
+  if (!decision || !ALLOWED_REFILL_DECISIONS.has(decision)) return errRes(res, 'decision must be one of approved|rejected|fulfilled');
+  const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    const cur = await pool.query(
+      `SELECT status, patient_id, drug_name FROM refill_requests
+        WHERE request_id = '${request_id.replace(/'/g, "''")}' LIMIT 1`
+    );
+    if (!cur.rows.length) return errRes(res, 'refill request not found', 404);
+    const curRow = cur.rows[0];
+    const curStatus = curRow[0];
+    if (!REFILL_VALID_TRANSITIONS[decision].has(curStatus)) {
+      return errRes(res, `cannot transition ${curStatus} → ${decision}`, 409);
+    }
+    await pool.query(
+      `UPDATE refill_requests
+          SET status = '${decision}',
+              decided_at = '${ts}',
+              decided_by = '${doctor_id.replace(/'/g, "''")}',
+              doctor_notes = ${doctor_notes ? `'${String(doctor_notes).replace(/'/g, "''")}'` : 'NULL'}
+        WHERE request_id = '${request_id.replace(/'/g, "''")}'`
+    );
+    await audit(pool, req, {
+      actor_kind: 'doctor', actor_id: doctor_id,
+      action: 'decide', resource_kind: 'refill_request', resource_id: request_id,
+      diff_json: { from: curStatus, to: decision, doctor_notes: doctor_notes || null, patient_id: curRow[1], drug_name: curRow[2] },
+    });
+    jsonRes(res, { request_id, status: decision, decided_at: ts, decided_by: doctor_id });
+  } catch (e) { errRes(res, e.message, 500); }
 });
 
 // ============ REMINDERS ============
