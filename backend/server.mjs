@@ -186,8 +186,8 @@ app.post('/api/auth/signup', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    setCsrfCookie(res, csrfSecret);
-    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
+    const csrfToken = setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/login', async (req, res) => {
@@ -623,8 +623,13 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
 // omitted this attachment, causing every patient POST to 401 with
 // 'no session for CSRF check'.)
 const requirePatientAuth = async (req, res, next) => {
-  const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
-  const sess = await patientAuth.getPatientSession(pool, sid);
+  // Delegate to getPatientSession (helpers block) so csrfSecret is attached
+  // — requiredPatientAuthCsrf checks req.patientSession.csrfSecret to verify
+  // the double-submit token. The original inline version missed this
+  // attachment, which silently 401'd every patient POST (vitals, refill,
+  // booking, etc.) once Week-1 CSRF shipped. Fixed as part of B5 booking
+  // because that flow is the first end-to-end test of patient + CSRF.
+  const sess = await getPatientSession(req);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
   // Mirror the doctor getSession wrapper (lines 98-105) — bind the per-
   // session CSRF secret so the downstream requireCsrf middleware can verify
