@@ -58,6 +58,79 @@
       background: #f3f4f6; border-radius: 8px;
       font-size: 13px; margin: 4px 4px 4px 0;
     }
+    /* ===== Week-2 / patient cards (adherence + refill + appointment) ===== */
+    .section-card-head {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-card-head .section-title { margin-bottom: 0; flex: 1; }
+    .streak-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: linear-gradient(135deg, #f97316, #ef4444);
+      color: white; font-size: 12px; font-weight: 600;
+      padding: 4px 10px; border-radius: 12px;
+    }
+    .refill-count {
+      display: inline-block; min-width: 22px; text-align: center;
+      background: var(--primary); color: white;
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 10px;
+    }
+    .refill-count[data-empty="true"] { background: var(--text-secondary); }
+    .dose-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .dose-row:last-child { border-bottom: none; }
+    .dose-row.taken .dose-name { text-decoration: line-through; color: var(--text-secondary); }
+    .dose-check {
+      display: flex; align-items: center; gap: 12px; flex: 1; cursor: pointer;
+    }
+    .dose-check input[type="checkbox"] {
+      width: 22px; height: 22px; accent-color: var(--primary); cursor: pointer;
+    }
+    .dose-check input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.6; }
+    .dose-info { display: flex; flex-direction: column; }
+    .dose-name { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+    .dose-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+    .status-pill {
+      display: inline-block; font-size: 10px; font-weight: 700;
+      padding: 2px 8px; border-radius: 10px; text-transform: uppercase;
+    }
+    .status-pill.pending   { background: #fef3c7; color: #92400e; }
+    .status-pill.approved  { background: #d1fae5; color: #065f46; }
+    .status-pill.rejected  { background: #fee2e2; color: #991b1b; }
+    .status-pill.fulfilled { background: #dbeafe; color: #1e40af; }
+    .refill-row {
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    }
+    .refill-row:last-child { border-bottom: none; }
+    .refill-row .rname { font-size: 13px; font-weight: 600; }
+    .refill-row .rmeta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+    .refill-row .rnotes {
+      font-size: 11px; color: var(--text-secondary); margin-top: 4px;
+      padding: 4px 8px; background: #f9fafb; border-radius: 6px;
+    }
+    .appt-card {
+      padding: 12px; background: #f9fafb; border-radius: 10px;
+      border-left: 4px solid var(--primary);
+    }
+    .appt-card .adate { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+    .appt-card .areason { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+    .appt-card .adoctor { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+    .appt-card .aactions { margin-top: 8px; }
+    .slot-day {
+      margin-top: 12px; font-size: 13px; font-weight: 600;
+      color: var(--text-primary); border-bottom: 1px solid var(--border); padding-bottom: 4px;
+    }
+    .slot-day:first-child { margin-top: 0; }
+    .slot-row {
+      display: flex; align-items: center; gap: 8px; padding: 6px 0;
+    }
+    .slot-row input[type="radio"] { accent-color: var(--primary); }
+    .slot-row label { font-size: 13px; cursor: pointer; }
+    .slot-row .stime { font-weight: 600; }
+    .slot-row .sdoc { font-size: 11px; color: var(--text-secondary); margin-left: 8px; }
     .bottom-nav {
       position: fixed; bottom: 0; left: 0; right: 0;
       background: white; border-top: 1px solid var(--border);
@@ -121,6 +194,35 @@
       <div id="reminders-list">कोई रिमाइंडर नहीं</div>
     </div>
 
+    <!-- Week-2 / Card A — Medication adherence (B1 backend) -->
+    <div class="section-card" id="adherence-section">
+      <div class="section-card-head">
+        <div class="section-title">💊 आज की दवाई</div>
+        <span class="streak-badge" id="adherence-streak" hidden>🔥 <span id="streak-days">0</span> दिन</span>
+      </div>
+      <div id="adherence-list">लोड हो रहा है...</div>
+    </div>
+
+    <!-- Week-2 / Card B — Refill request (B2 backend) -->
+    <div class="section-card" id="refill-section">
+      <div class="section-card-head">
+        <div class="section-title">🔄 दवाई रिफ़िल</div>
+        <span class="refill-count" id="refill-count" data-empty="true">0</span>
+      </div>
+      <button class="btn btn-primary" id="new-refill-btn" style="margin-bottom:12px;width:100%;">
+        + नया रिफ़िल अनुरोध
+      </button>
+      <div id="refill-list">कोई अनुरोध नहीं</div>
+    </div>
+
+    <!-- Week-2 / Card C — Next appointment + booking (B5 backend) -->
+    <div class="section-card" id="next-appt-section">
+      <div class="section-card-head">
+        <div class="section-title">📅 अगली मुलाकात</div>
+      </div>
+      <div id="next-appt-content">लोड हो रहा है...</div>
+    </div>
+
     <div class="section-card">
       <div class="section-title">🚨 एलर्जी</div>
       <div id="allergies-list">कोई ज्ञात एलर्जी नहीं</div>
@@ -144,9 +246,50 @@
     </div>
   </nav>
 
+  <script src="/static/app.js"></script>
   <script type="module">
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
-    import { classify, chipHtml, EmptyState, metricLabel as ml } from '/static/components/index.mjs';
+    import { classify, chipHtml, EmptyState, LoadingSkeleton, metricLabel as ml } from '/static/components/index.mjs';
+
+    // Defensive local getCookie — if /static/app.js fails to load (CDN hiccup,
+    // offline, etc.), the new card POSTs still need to read the csrf_token
+    // cookie. Matches the same regex as TatvaCare.getCookie.
+    function getCookie(name) {
+      if (!name) return null;
+      const re = new RegExp('(?:^|;\\s*)' + name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') + '=([^;]*)');
+      const m = document.cookie.match(re);
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+    const API = (window.TatvaCare && window.TatvaCare.API) || {
+      async req(path, opts = {}) {
+        const method = (opts.method || 'GET').toUpperCase();
+        const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+        if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+          const t = getCookie('csrf_token');
+          if (t) headers['x-csrf-token'] = t;
+        }
+        const r = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error?.message || `HTTP ${r.status}`);
+        return data;
+      },
+      get: (p) => API.req(p),
+      post: (p, body) => API.req(p, { method: 'POST', body: JSON.stringify(body) }),
+    };
+    const toast = (m, t = 'success') => (window.TatvaCare && window.TatvaCare.showToast) ? window.TatvaCare.showToast(m, t) : console.log(t, m);
+    // Open a modal and return the live overlay element. showModal() appends to
+    // body synchronously and returns a Promise that only resolves on close —
+    // so we grab the freshly-appended overlay from the DOM right after the
+    // call. Returns null if the helper isn't loaded.
+    function modal(title, body, footer) {
+      if (!window.TatvaCare || !window.TatvaCare.showModal) return null;
+      window.TatvaCare.showModal(title, body, footer);
+      const all = document.querySelectorAll('.modal-overlay');
+      return all[all.length - 1] || null;
+    }
+    // Confirm prompt without using the broken showModal for confirmation
+    // (confirm() blocks the page; OK for short flows like cancel-appointment).
+    const confirmDialog = (msg) => Promise.resolve(window.confirm(msg));
 
     let me = null;
     async function load() {
@@ -160,6 +303,13 @@
       const r2 = await fetch('/api/patient/me');
       const j2 = await r2.json();
       render(j2);
+      // Week-2 / patient-portal cards — load in parallel so the page
+      // stays snappy even if one endpoint is slow.
+      Promise.allSettled([
+        loadAdherenceCard(),
+        loadRefillCard(),
+        loadAppointmentCard(),
+      ]);
     }
     function render({ patient, vitals, prescriptions, allergies, reminders, appointments }) {
       // Recent vitals (latest 5) — wired through clinical-ranges.classify() so
@@ -255,6 +405,374 @@
       window.location.href = '/patient';
     }
     document.getElementById('logout-btn').onclick = logout;
+
+    // ============ Week-2 / patient cards ============
+    // Each loader fetches in parallel, renders into its own <div>, and wires
+    // up click handlers. Failures fall back to EmptyState so the page never
+    // shows a stuck "लोड हो रहा है..." placeholder. Endpoints:
+    //   GET  /api/patient/adherence/today         → Card A (today's doses)
+    //   GET  /api/patient/adherence               → streak_days rollup
+    //   POST /api/patient/adherence               → mark dose as taken
+    //   GET  /api/patient/refill                  → Card B (last 3 requests)
+    //   POST /api/patient/refill                  → create new request
+    //   GET  /api/patient/appointments            → Card C (next upcoming)
+    //   GET  /api/patient/appointment-slots       → list bookable slots
+    //   POST /api/patient/appointments            → book a slot
+    //   POST /api/patient/appointments/:id/cancel → cancel upcoming
+
+    async function loadAdherenceCard() {
+      const list = document.getElementById('adherence-list');
+      const streakEl = document.getElementById('adherence-streak');
+      const streakDays = document.getElementById('streak-days');
+      if (!list) return;
+      // Loading skeleton — 3 placeholder rows so the layout doesn't jump.
+      list.innerHTML = Array(3).fill('').map(() =>
+        '<div class="dose-row"><div class="skeleton" style="height:18px;flex:1;border-radius:4px;"></div></div>'
+      ).join('');
+      try {
+        // Today's doses + the streak rollup (range endpoint). Both reads in
+        // parallel so the card paints in a single network round-trip.
+        const [todayRes, rangeRes] = await Promise.allSettled([
+          API.get('/api/patient/adherence/today'),
+          API.get('/api/patient/adherence'),
+        ]);
+        const today = todayRes.status === 'fulfilled' ? (todayRes.value.rows || []) : [];
+        const streak = rangeRes.status === 'fulfilled' ? (rangeRes.value.streak_days || 0) : 0;
+        if (streak > 0) {
+          streakDays.textContent = String(streak);
+          streakEl.hidden = false;
+        } else {
+          streakEl.hidden = true;
+        }
+        if (!today.length) {
+          list.innerHTML = EmptyState({
+            icon: 'pill',
+            title: 'आज कोई दवाई नहीं',
+            description: 'आज के लिए कोई दवाई याद नहीं है।',
+          });
+          return;
+        }
+        list.innerHTML = today.map(d => {
+          const taken = d.status === 'taken';
+          const slot = d.schedule_slot || '—';
+          const dose = d.dose ? ` · ${escapeHtml(d.dose)}` : '';
+          return `<div class="dose-row ${taken ? 'taken' : ''}">
+            <label class="dose-check">
+              <input type="checkbox"
+                data-slot="${escapeHtml(d.schedule_slot || 'morning')}"
+                data-drug="${escapeHtml(d.drug_name || '')}"
+                data-dose="${escapeHtml(d.dose || '')}"
+                data-scheduled="${escapeHtml(d.scheduled_at || '')}"
+                ${taken ? 'checked disabled' : ''}>
+              <div class="dose-info">
+                <span class="dose-name">${escapeHtml(d.drug_name || 'Unknown')}</span>
+                <span class="dose-meta">${escapeHtml(slot)}${dose}</span>
+              </div>
+            </label>
+          </div>`;
+        }).join('');
+        // Wire checkbox clicks → POST /api/patient/adherence
+        list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+          cb.addEventListener('change', async (e) => {
+            if (!e.target.checked) return;
+            const slot = e.target.dataset.slot || 'morning';
+            const drug = e.target.dataset.drug || 'medication';
+            const dose = e.target.dataset.dose || null;
+            const scheduled = e.target.dataset.scheduled || new Date().toISOString();
+            e.target.disabled = true;
+            try {
+              await API.post('/api/patient/adherence', {
+                drug_name: drug,
+                dose,
+                schedule_slot: slot,
+                scheduled_at: scheduled,
+                status: 'taken',
+                taken_at: new Date().toISOString(),
+              });
+              toast(`✓ ${drug} ली गई`, 'success');
+              e.target.closest('.dose-row').classList.add('taken');
+              // Refresh streak badge + counts after a short delay (lets DB
+              // commit before re-query).
+              setTimeout(() => { loadAdherenceCard(); }, 600);
+            } catch (err) {
+              toast(`त्रुटि: ${err.message}`, 'error');
+              e.target.checked = false;
+              e.target.disabled = false;
+            }
+          });
+        });
+      } catch (e) {
+        list.innerHTML = EmptyState({
+          icon: 'alert',
+          title: 'लोड नहीं हो सका',
+          description: e.message,
+        });
+      }
+    }
+
+    async function loadRefillCard() {
+      const list = document.getElementById('refill-list');
+      const countEl = document.getElementById('refill-count');
+      const newBtn = document.getElementById('new-refill-btn');
+      if (!list || !countEl || !newBtn) return;
+      list.innerHTML = '<div class="skeleton" style="height:32px;border-radius:6px;"></div>';
+      try {
+        const res = await API.get('/api/patient/refill');
+        const requests = res.requests || [];
+        const pending = requests.filter(r => r.status === 'pending').length;
+        countEl.textContent = String(pending);
+        countEl.dataset.empty = pending === 0 ? 'true' : 'false';
+        if (!requests.length) {
+          list.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);text-align:center;padding:8px;">कोई अनुरोध नहीं</div>';
+        } else {
+          list.innerHTML = requests.slice(0, 3).map(r => {
+            const status = (r.status || 'pending').toLowerCase();
+            const urgency = r.urgency && r.urgency !== 'normal' ? ` · ${escapeHtml(r.urgency)}` : '';
+            const notes = r.doctor_notes
+              ? `<div class="rnotes">📝 ${escapeHtml(r.doctor_notes)}</div>` : '';
+            const created = formatDate(r.created_at);
+            const qty = r.requested_qty ? `${r.requested_qty} गोली` : '?';
+            return `<div class="refill-row">
+              <div style="flex:1;">
+                <div class="rname">💊 ${escapeHtml(r.drug_name || '—')}</div>
+                <div class="rmeta">${qty} · ${escapeHtml(status)}${urgency} · ${created}</div>
+                ${notes}
+              </div>
+              <span class="status-pill ${status}">${escapeHtml(status)}</span>
+            </div>`;
+          }).join('');
+        }
+        // Wire the "New refill request" button once.
+        if (!newBtn._wired) {
+          newBtn._wired = true;
+          newBtn.addEventListener('click', () => openNewRefillModal());
+        }
+      } catch (e) {
+        list.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">लोड नहीं हो सका: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function openNewRefillModal() {
+      const body = `
+        <form id="refill-form" onsubmit="return false;">
+          <div style="margin-bottom:12px;">
+            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">दवाई का नाम *</label>
+            <input type="text" name="drug_name" required style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;" placeholder="Metformin">
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:12px;">
+            <div style="flex:1;">
+              <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">मौजूदा स्टॉक (दिन)</label>
+              <input type="number" name="current_stock" min="0" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;" placeholder="3">
+            </div>
+            <div style="flex:1;">
+              <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">अनुरोधित मात्रा *</label>
+              <input type="number" name="requested_qty" min="1" required style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;" placeholder="30">
+            </div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">तात्कालिकता</label>
+            <select name="urgency" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;">
+              <option value="low">कम (Low)</option>
+              <option value="normal" selected>सामान्य (Normal)</option>
+              <option value="high">उच्च (High)</option>
+              <option value="urgent">अत्यावश्यक (Urgent)</option>
+            </select>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">टिप्पणी</label>
+            <textarea name="patient_notes" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical;" placeholder="कोई अतिरिक्त जानकारी"></textarea>
+          </div>
+        </form>
+      `;
+      const footer = `
+        <button class="btn" data-action="close" style="margin-right:8px;">रद्द करें</button>
+        <button class="btn btn-primary" id="refill-submit">अनुरोध भेजें</button>
+      `;
+      const overlay = modal('दवाई रिफ़िल अनुरोध', body, footer);
+      if (!overlay) {
+        toast('मॉडल नहीं खुल सका — पेज रीफ़्रेश करें', 'error');
+        return;
+      }
+      const submitBtn = overlay.querySelector('#refill-submit');
+      const form = overlay.querySelector('#refill-form');
+      submitBtn.addEventListener('click', async () => {
+        const data = Object.fromEntries(new FormData(form));
+        if (!data.drug_name || !data.requested_qty) {
+          toast('दवाई का नाम और मात्रा आवश्यक है', 'error');
+          return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'भेज रहे हैं...';
+        try {
+          await API.post('/api/patient/refill', {
+            drug_name: data.drug_name,
+            current_stock: data.current_stock ? parseInt(data.current_stock, 10) : null,
+            requested_qty: parseInt(data.requested_qty, 10),
+            urgency: data.urgency || 'normal',
+            patient_notes: data.patient_notes || null,
+          });
+          toast('✓ रिफ़िल अनुरोध भेजा गया', 'success');
+          overlay.remove();
+          loadRefillCard();
+        } catch (err) {
+          toast(`त्रुटि: ${err.message}`, 'error');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'अनुरोध भेजें';
+        }
+      });
+    }
+
+    async function loadAppointmentCard() {
+      const content = document.getElementById('next-appt-content');
+      if (!content) return;
+      content.innerHTML = '<div class="skeleton" style="height:48px;border-radius:6px;"></div>';
+      try {
+        const res = await API.get('/api/patient/appointments');
+        const now = Date.now();
+        const appts = (res.appointments || [])
+          .filter(a => a.status !== 'cancelled')
+          .map(a => ({ ...a, _ts: a.scheduled_at ? new Date(a.scheduled_at).getTime() : 0 }))
+          .sort((a, b) => a._ts - b._ts);
+        const upcoming = appts.find(a => a._ts >= now);
+        const next = upcoming || appts[0] || null;
+        if (!next) {
+          content.innerHTML = `
+            <div style="text-align:center;padding:8px 0;">
+              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">कोई अपॉइंटमेंट नहीं</div>
+              <button class="btn btn-primary" id="book-appt-btn" style="width:100%;">अपॉइंटमेंट बुक करें</button>
+            </div>`;
+          content.querySelector('#book-appt-btn').addEventListener('click', () => openBookingModal());
+          return;
+        }
+        const when = formatDate(next.scheduled_at);
+        const reason = next.reason ? escapeHtml(next.reason) : '—';
+        const docLine = next.doctor_id ? `डॉक्टर: ${escapeHtml(next.doctor_id)}` : '';
+        const isPast = next._ts < now;
+        content.innerHTML = `
+          <div class="appt-card">
+            <div class="adate">📅 ${when}${isPast ? ' (पिछली)' : ''}</div>
+            <div class="areason">${reason}</div>
+            ${docLine ? `<div class="adoctor">${docLine}</div>` : ''}
+            <div class="aactions">
+              <button class="btn" id="cancel-appt-btn" data-id="${escapeHtml(next.appointment_id)}" style="font-size:12px;padding:4px 12px;">रद्द करें</button>
+              <button class="btn btn-primary" id="book-appt-btn" style="font-size:12px;padding:4px 12px;margin-left:6px;">नई बुकिंग</button>
+            </div>
+          </div>`;
+        content.querySelector('#cancel-appt-btn').addEventListener('click', async (e) => {
+          const id = e.target.dataset.id;
+          if (!await confirmDialog('अपॉइंटमेंट रद्द करें?')) return;
+          e.target.disabled = true;
+          try {
+            await API.post(`/api/patient/appointments/${encodeURIComponent(id)}/cancel`, {});
+            toast('✓ अपॉइंटमेंट रद्द हो गया', 'success');
+            loadAppointmentCard();
+          } catch (err) {
+            toast(`त्रुटि: ${err.message}`, 'error');
+            e.target.disabled = false;
+          }
+        });
+        content.querySelector('#book-appt-btn').addEventListener('click', () => openBookingModal());
+      } catch (e) {
+        content.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">लोड नहीं हो सका: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function openBookingModal() {
+      // Date range: today → today+7 (matches task spec).
+      const today = new Date();
+      const in7 = new Date(today.getTime() + 7 * 86400 * 1000);
+      const fmt = (d) => d.toISOString().slice(0, 10);
+      const from = fmt(today), to = fmt(in7);
+      const body = `
+        <div id="slot-loader" class="skeleton" style="height:80px;border-radius:6px;"></div>
+        <div id="slot-list" hidden></div>
+        <div style="margin-top:12px;">
+          <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">कारण (वैकल्पिक)</label>
+          <textarea id="appt-reason" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:14px;resize:vertical;" placeholder="रूटीन जाँच / सलाह"></textarea>
+        </div>
+      `;
+      const footer = `
+        <button class="btn" data-action="close" style="margin-right:8px;">रद्द करें</button>
+        <button class="btn btn-primary" id="appt-submit" disabled>बुक करें</button>
+      `;
+      const overlay = modal('अपॉइंटमेंट बुक करें', body, footer);
+      if (!overlay) {
+        toast('मॉडल नहीं खुल सका — पेज रीफ़्रेश करें', 'error');
+        return;
+      }
+      const slotList = overlay.querySelector('#slot-list');
+      const loader = overlay.querySelector('#slot-loader');
+      const submitBtn = overlay.querySelector('#appt-submit');
+      let selectedSlot = null;
+      // Fire slot fetch in the background; modal stays usable while loading.
+      API.get(`/api/patient/appointment-slots?from=${from}&to=${to}`)
+        .then(res => {
+          const slots = res.slots || [];
+          if (!slots.length) {
+            loader.innerHTML = '<div style="font-size:13px;color:var(--text-secondary);">इस सप्ताह कोई स्लॉट उपलब्ध नहीं</div>';
+            return;
+          }
+          // Group by date so the user sees a per-day list, not 1 huge list.
+          const byDate = new Map();
+          for (const s of slots) {
+            const day = s.slot_date || '—';
+            if (!byDate.has(day)) byDate.set(day, []);
+            byDate.get(day).push(s);
+          }
+          const dayFmt = (iso) => {
+            try {
+              return new Date(iso + 'T00:00:00').toLocaleDateString('hi-IN',
+                { weekday: 'short', day: '2-digit', month: 'short' });
+            } catch { return iso; }
+          };
+          let html = '';
+          for (const [day, items] of byDate) {
+            html += `<div class="slot-day">${escapeHtml(dayFmt(day))}</div>`;
+            html += items.map(s => {
+              const time = (s.slot_time || '').slice(0, 5);
+              const doc = s.doctor_id ? `<span class="sdoc">${escapeHtml(s.doctor_id)}</span>` : '';
+              const id = escapeHtml(s.slot_id);
+              return `<div class="slot-row">
+                <input type="radio" name="appt-slot" value="${id}" id="slot-${id}">
+                <label for="slot-${id}"><span class="stime">${escapeHtml(time)}</span>${doc}</label>
+              </div>`;
+            }).join('');
+          }
+          slotList.innerHTML = html;
+          loader.hidden = true;
+          slotList.hidden = false;
+          slotList.querySelectorAll('input[type="radio"]').forEach(r => {
+            r.addEventListener('change', (e) => {
+              selectedSlot = e.target.value;
+              submitBtn.disabled = false;
+            });
+          });
+        })
+        .catch(err => {
+          loader.innerHTML = `<div style="font-size:13px;color:var(--text-secondary);">स्लॉट लोड नहीं हो सके: ${escapeHtml(err.message)}</div>`;
+        });
+      submitBtn.addEventListener('click', async () => {
+        if (!selectedSlot) return;
+        const reason = overlay.querySelector('#appt-reason').value || null;
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'बुक हो रहा है...';
+        try {
+          await API.post('/api/patient/appointments', {
+            slot_id: selectedSlot,
+            reason,
+            kind: 'in_person',
+          });
+          toast('✓ अपॉइंटमेंट बुक हो गया', 'success');
+          overlay.remove();
+          loadAppointmentCard();
+        } catch (err) {
+          toast(`त्रुटि: ${err.message}`, 'error');
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'बुक करें';
+        }
+      });
+    }
+
     load();
   </script>
 </body>
