@@ -14,10 +14,19 @@ INSERT INTO patients (patient_id, abha_number, full_name, dob, gender, phone, em
   ('p-004', '14-3344-5566-7811', 'Anita Singh', '1992-07-18', 'F', '+919812345676', 'anita@example.com', 'AB+', '14, Civil Lines', 'Jaipur', 'Rohit Singh', '+919812345677', 'Brother'),
   ('p-005', '14-3344-5566-7822', 'Vikram Joshi', '1970-02-28', 'M', '+919812345678', 'vikram@example.com', 'O-', 'C-8, Koregaon Park', 'Pune', 'Priya Joshi', '+919812345679', 'Wife');
 
-INSERT INTO appointments (appt_id, patient_id, doctor_id, scheduled_at, type, status, reason) VALUES
-  ('a-001', 'p-001', 'd-001', now() + interval '1 day', 'opd', 'confirmed', 'Routine cardiac follow-up'),
-  ('a-002', 'p-003', 'd-002', now() + interval '3 day', 'tele', 'scheduled', 'Diabetes management review'),
-  ('a-003', 'p-002', 'd-001', now() - interval '7 day', 'opd', 'completed', 'Initial consultation');
+-- TatvaCare Week 2 — appointments table was migrated to a new schema
+-- in 009_appointments.sql (PK renamed appt_id → appointment_id, added
+-- `kind` column alongside the legacy `type` column, added slot/cancel
+-- metadata). This seed insert targets the post-009 schema:
+--   - `appointment_id` instead of `appt_id`
+--   - `kind` set to 'in_person' | 'tele' (mirror of legacy `type`)
+-- The legacy `type` column is still present and gets the original value
+-- so any code that still reads it (e.g. doctor-side calendar) keeps
+-- working.
+INSERT INTO appointments (appointment_id, patient_id, doctor_id, scheduled_at, type, kind, status, reason) VALUES
+  ('a-001', 'p-001', 'd-001', now() + interval '1 day', 'opd', 'in_person', 'confirmed', 'Routine cardiac follow-up'),
+  ('a-002', 'p-003', 'd-002', now() + interval '3 day', 'tele', 'tele', 'scheduled', 'Diabetes management review'),
+  ('a-003', 'p-002', 'd-001', now() - interval '7 day', 'opd', 'in_person', 'completed', 'Initial consultation');
 
 INSERT INTO prescriptions (rx_id, rx_number, patient_id, doctor_id, appt_id, diagnosis_code, diagnosis_label, chief_complaint, vitals_bp, vitals_pulse, vitals_spo2, vitals_weight_kg, rx_items, advice, followup_in_days, delivery_method, delivered_at, created_at) VALUES
   ('r-001', 'TC-2026-000001', 'p-002', 'd-001', 'a-003', 'I10', 'Essential hypertension', 'Headaches, dizziness on exertion', '150/95', 82, 97, 68.5, '[{"drug":"Amlodipine","dose":"5mg","frequency":"OD","duration":30,"instruction":"After breakfast"},{"drug":"Telmisartan","dose":"40mg","frequency":"OD","duration":30,"instruction":"Morning"}]', 'Reduce salt intake. Walk 30 min daily. Recheck BP after 2 weeks.', 14, 'whatsapp', '2026-06-14 10:00:00+00', '2026-06-14 10:00:00+00'),
