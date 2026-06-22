@@ -720,3 +720,58 @@ table .num { text-align: right; font-variant-numeric: tabular-nums; }
   50% { box-shadow: 0 0 0 16px rgba(239, 68, 68, 0); }
   100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
+
+/* ============ Week 1 frontend polish: a11y + severity chips ============ */
+/* Reference: docs/UI_DESIGN_AUDIT.md Findings 1, 4, Heuristic 10. */
+
+/* Skip-link — visually hidden until focused via keyboard. WCAG 2.4.1 bypass blocks. */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 8px;
+  background: #111827;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  z-index: 10000;
+  transition: top .15s ease;
+}
+.skip-link:focus { top: 8px; outline: 3px solid #fbbf24; outline-offset: 2px; }
+
+/* Main content area must accept focus for the skip-link target. */
+#main-content:focus { outline: none; }
+
+/* Global keyboard focus ring — Tailwind-style, applies to all interactive
+   elements without conflicting with custom button styles. */
+*:focus-visible {
+  outline: 3px solid #6366f1;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Severity chip — replaces ad-hoc "vital-flag high/low" two-state rendering
+   with a proper three-band (normal/borderline/critical) clinical classification. */
+.vital-chip {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.vital-chip.chip--normal {
+  background: #dcfce7;
+  color: #166534;
+}
+.vital-chip.chip--borderline {
+  background: #fef3c7;
+  color: #92400e;
+}
+.vital-chip.chip--critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
