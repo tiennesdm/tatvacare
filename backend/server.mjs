@@ -199,8 +199,11 @@ app.post('/api/auth/login', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
-    setCsrfCookie(res, csrfSecret);
-    jsonRes(res, { doctor, csrfToken: csrfTokenFor(csrfSecret) });
+    // Use the SAME token that setCsrfCookie put in the cookie for the body —
+    // csrfTokenFor() generates a fresh token (different salt) so the cookie
+    // and body would disagree and the double-submit check would always 403.
+    const csrfToken = setCsrfCookie(res, csrfSecret);
+    jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
 });
 app.post('/api/auth/logout', requireAuthCsrf, async (req, res) => {
@@ -612,6 +615,13 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
 });
 
 // ============ PATIENT PORTAL ============
+// Patient auth middleware — pulls the pid cookie, validates the session row,
+// and attaches the patient profile + csrfSecret to req.patientSession. The
+// csrfSecret comes from the in-memory Map populated by patient login (see
+// /api/patient/auth/login) — without it requirePatientAuthCsrf cannot verify
+// the x-csrf-token header on subsequent POSTs. (Bug fix: earlier version
+// omitted this attachment, causing every patient POST to 401 with
+// 'no session for CSRF check'.)
 const requirePatientAuth = async (req, res, next) => {
   const sid = req.headers.cookie?.match(/pid=([^;]+)/)?.[1];
   const sess = await patientAuth.getPatientSession(pool, sid);
