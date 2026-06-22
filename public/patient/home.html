@@ -249,7 +249,7 @@
   <script src="/static/app.js"></script>
   <script type="module">
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(() => {});
-    import { classify, chipHtml, EmptyState, LoadingSkeleton, metricLabel as ml } from '/static/components/index.mjs';
+    import { classify, chipHtml, EmptyState, metricLabel as ml } from '/static/components/index.mjs';
 
     // Defensive local getCookie — if /static/app.js fails to load (CDN hiccup,
     // offline, etc.), the new card POSTs still need to read the csrf_token
@@ -523,7 +523,11 @@
         countEl.textContent = String(pending);
         countEl.dataset.empty = pending === 0 ? 'true' : 'false';
         if (!requests.length) {
-          list.innerHTML = '<div style="font-size:12px;color:var(--text-secondary);text-align:center;padding:8px;">कोई अनुरोध नहीं</div>';
+          list.innerHTML = EmptyState({
+            icon: 'pill',
+            title: 'कोई अनुरोध नहीं',
+            description: 'नया रिफ़िल अनुरोध ऊपर के बटन से बनाएँ।',
+          });
         } else {
           list.innerHTML = requests.slice(0, 3).map(r => {
             const status = (r.status || 'pending').toLowerCase();
@@ -548,7 +552,11 @@
           newBtn.addEventListener('click', () => openNewRefillModal());
         }
       } catch (e) {
-        list.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">लोड नहीं हो सका: ${escapeHtml(e.message)}</div>`;
+        list.innerHTML = EmptyState({
+          icon: 'alert',
+          title: 'लोड नहीं हो सका',
+          description: e.message,
+        });
       }
     }
 
@@ -636,12 +644,13 @@
         const upcoming = appts.find(a => a._ts >= now);
         const next = upcoming || appts[0] || null;
         if (!next) {
-          content.innerHTML = `
-            <div style="text-align:center;padding:8px 0;">
-              <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">कोई अपॉइंटमेंट नहीं</div>
-              <button class="btn btn-primary" id="book-appt-btn" style="width:100%;">अपॉइंटमेंट बुक करें</button>
-            </div>`;
-          content.querySelector('#book-appt-btn').addEventListener('click', () => openBookingModal());
+          content.innerHTML = EmptyState({
+            icon: 'calendar',
+            title: 'कोई अपॉइंटमेंट नहीं',
+            description: 'अगले 7 दिनों में कोई स्लॉट चुनें।',
+            actionLabel: 'अपॉइंटमेंट बुक करें',
+            actionOnclick: 'openBookingModal()',
+          });
           return;
         }
         const when = formatDate(next.scheduled_at);
@@ -673,7 +682,11 @@
         });
         content.querySelector('#book-appt-btn').addEventListener('click', () => openBookingModal());
       } catch (e) {
-        content.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);">लोड नहीं हो सका: ${escapeHtml(e.message)}</div>`;
+        content.innerHTML = EmptyState({
+          icon: 'alert',
+          title: 'लोड नहीं हो सका',
+          description: e.message,
+        });
       }
     }
 

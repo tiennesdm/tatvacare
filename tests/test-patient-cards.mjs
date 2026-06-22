@@ -234,6 +234,49 @@ await check('home.html wires the 3 loaders via Promise.allSettled', async () => 
   assert.match(src, /Promise\.allSettled\(\[\s*loadAdherenceCard\s*\(\s*\)\s*,\s*loadRefillCard\s*\(\s*\)\s*,\s*loadAppointmentCard\s*\(\s*\)\s*,?\s*\]/, 'parallel loader trigger missing');
 });
 
+// ============ 6. B3.1 polish — refill + appointment cards use EmptyState ============
+//
+// B3 verifier flagged that the refill and appointment cards fell back to
+// plain `<div>` on empty/error, while adherence (correctly) used EmptyState.
+// B3.1 polish swaps the four plain-div fallbacks (refill-empty, refill-error,
+// appointment-empty, appointment-error) to EmptyState(...) calls so the cards
+// match adherence's visual language. The dead LoadingSkeleton import is
+// also dropped (this file never called it).
+await check('refill card uses EmptyState for empty/error (B3.1 polish)', async () => {
+  const src = readFileSync(homeHtmlPath, 'utf8');
+  // Extract the body of loadRefillCard — between its header and the next
+  // `function ` or end of script block.
+  const m = src.match(/async\s+function\s+loadRefillCard\s*\([^)]*\)\s*\{([\s\S]*?)\n\s{4}\}/);
+  assert.ok(m, 'loadRefillCard body not found');
+  const body = m[1];
+  assert.match(body, /EmptyState\s*\(/, 'loadRefillCard must use EmptyState(...) — plain-div fallback regressed');
+  // Specifically: no surviving `font-size:12px;color:var(--text-secondary)` —
+  // that's the signature of the pre-polish plain divs.
+  assert.doesNotMatch(body, /font-size:\s*12px;color:var\(--text-secondary\)/,
+    'loadRefillCard still contains pre-polish plain-div fallback');
+});
+
+await check('appointment card uses EmptyState for empty/error (B3.1 polish)', async () => {
+  const src = readFileSync(homeHtmlPath, 'utf8');
+  const m = src.match(/async\s+function\s+loadAppointmentCard\s*\([^)]*\)\s*\{([\s\S]*?)\n\s{4}\}/);
+  assert.ok(m, 'loadAppointmentCard body not found');
+  const body = m[1];
+  assert.match(body, /EmptyState\s*\(/, 'loadAppointmentCard must use EmptyState(...) — plain-div fallback regressed');
+  assert.doesNotMatch(body, /font-size:\s*12px;color:var\(--text-secondary\)/,
+    'loadAppointmentCard still contains pre-polish plain-div fallback');
+});
+
+await check('home.html ES-module import no longer pulls in unused LoadingSkeleton', async () => {
+  const src = readFileSync(homeHtmlPath, 'utf8');
+  // The import line is `import { ... } from '/static/components/index.mjs';`
+  // — assert LoadingSkeleton is NOT in that line (it was imported but never
+  // called in this file; cards use raw `<div class="skeleton">` instead).
+  const importLine = src.match(/import\s*\{[^}]*\}\s*from\s*['"]\/static\/components\/index\.mjs['"]/);
+  assert.ok(importLine, 'ES-module import from components/index.mjs not found');
+  assert.doesNotMatch(importLine[0], /\bLoadingSkeleton\b/,
+    'LoadingSkeleton import is dead — drop it from the import line');
+});
+
 // ============ Summary ============
 console.log(`\n${pass + fail} checks  ·  ${pass} passed  ·  ${fail} failed`);
 if (fail > 0) {
