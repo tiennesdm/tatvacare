@@ -789,7 +789,6 @@ app.post('/api/patient/appointments', requirePatientAuthCsrf, async (req, res) =
       return errRes(res, 'slot not found', 404, 'NOT_FOUND');
     }
     const s = slotRes.rows[0];
-    console.log('[B5-DEBUG] slot lookup result:', JSON.stringify(s), 'status=', JSON.stringify(s[6]), 'type=', typeof s[6], 'isopen=', s[6] === 'open');
     if (s[6] !== 'open') {
       await conn.query('ROLLBACK');
       return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
@@ -820,7 +819,6 @@ app.post('/api/patient/appointments', requirePatientAuthCsrf, async (req, res) =
        WHERE slot_id = '${safeSlot}' AND status = 'open'`
     );
     const updMatch = (updRes.commandTag || '').match(/^(\d+)\s+row/);
-    console.log('[B5-DEBUG] update commandTag:', updRes.commandTag, 'updMatch:', updMatch && updMatch[1]);
     if (!updMatch || parseInt(updMatch[1], 10) === 0) {
       await conn.query('ROLLBACK');
       return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
