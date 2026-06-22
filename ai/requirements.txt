@@ -7,6 +7,11 @@ pandas
 pydantic
 Pillow
 pytesseract
+# PaddleOCR — bilingual (English + Hindi) OCR for Rx/lab/KYC.
+# Models are downloaded lazily on first use (~200MB each for en + hi).
+# Falls back to pytesseract if paddleocr/paddlepaddle are not importable.
+paddleocr>=2.7
+paddlepaddle>=2.6
 scikit-learn
 xgboost
 joblib

@@ -199,6 +199,9 @@ app.post('/api/auth/login', async (req, res) => {
     const sid = await auth.createSession(pool, doctor.doctor_id, req.headers['user-agent'], req.ip);
     const csrfSecret = bindCsrfToSession(sid);
     setCookie(res, 'sid', sid);
+    // Use the SAME token that setCsrfCookie put in the cookie for the body —
+    // csrfTokenFor() generates a fresh token (different salt) so the cookie
+    // and body would disagree and the double-submit check would always 403.
     const csrfToken = setCsrfCookie(res, csrfSecret);
     jsonRes(res, { doctor, csrfToken });
   } catch (e) { errRes(res, e.message, 500, 'SERVER_ERROR'); }
@@ -612,6 +615,13 @@ app.get('/api/ai/status', requireAuth, async (req, res) => {
 });
 
 // ============ PATIENT PORTAL ============
+// Patient auth middleware — pulls the pid cookie, validates the session row,
+// and attaches the patient profile + csrfSecret to req.patientSession. The
+// csrfSecret comes from the in-memory Map populated by patient login (see
+// /api/patient/auth/login) — without it requirePatientAuthCsrf cannot verify
+// the x-csrf-token header on subsequent POSTs. (Bug fix: earlier version
+// omitted this attachment, causing every patient POST to 401 with
+// 'no session for CSRF check'.)
 const requirePatientAuth = async (req, res, next) => {
   // Delegate to getPatientSession (helpers block) so csrfSecret is attached
   // — requiredPatientAuthCsrf checks req.patientSession.csrfSecret to verify
@@ -621,6 +631,12 @@ const requirePatientAuth = async (req, res, next) => {
   // because that flow is the first end-to-end test of patient + CSRF.
   const sess = await getPatientSession(req);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
+  // Mirror the doctor getSession wrapper (lines 98-105) — bind the per-
+  // session CSRF secret so the downstream requireCsrf middleware can verify
+  // the x-csrf-token header against the same secret bound at login time.
+  // Without this, every state-changing patient route would 401 with
+  // "no session for CSRF check" (csrf.mjs line 137-140).
+  sess.csrfSecret = lookupCsrfSecret(sid);
   req.patientSession = sess;
   next();
 };
@@ -636,6 +652,10 @@ app.post('/api/patient/auth/login', async (req, res) => {
     if (r.wrong) return errRes(res, 'wrong password', 401, 'UNAUTHORIZED');
     res.append('Set-Cookie', `pid=${r.session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
     const csrfSecret = bindCsrfToSession(r.session_id);
+    // Use the EXACT token setCsrfCookie put in the cookie — calling
+    // csrfTokenFor() again would mint a new (timestamp-based) token that
+    // would not match the cookie, breaking the double-submit check on
+    // every subsequent POST. See csrf.mjs line 96-111 for the rationale.
     const csrfToken = setCsrfCookie(res, csrfSecret);
     await audit(pool, req, { actor_kind: 'patient', actor_id: r.patient.patient_id, action: 'login', resource_kind: 'session', resource_id: r.session_id });
     jsonRes(res, { patient: r.patient, csrfToken });
@@ -716,208 +736,186 @@ app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   })) });
 });
 
-// ============ PATIENT APPOINTMENT BOOKING (B5) ============
-// Week-2 B5 — patient self-service: list open slots → book → list own → cancel.
-// Atomicity: POST uses pool.acquire() + BEGIN/COMMIT so the conditional
-// UPDATE (slot 'open' → 'booked' with appointment_id back-link) and the
-// INSERT into appointments commit together. Conditional UPDATE returns
-// rowsAffected=0 if the slot was already taken by a concurrent booking
-// → 409 SLOT_TAKEN. The pre-flight SELECT distinguishes "slot doesn't
-// exist" (404 NOT_FOUND) from "slot exists but not open" (409).
-const apptKindOrDefault = (k) => (k === 'tele' ? 'tele' : 'in_person');
-function apptSlotDateOnly(v) {
-  // Vedadb returns DATE as 'YYYY-MM-DD' or TIMESTAMP as 'YYYY-MM-DD HH:MM:SS'
-  if (v == null) return null;
-  const s = String(v);
-  return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s;
-}
-function apptSlotTimeOnly(v) {
-  if (v == null) return null;
-  const s = String(v);
-  // TIME may come as 'HH:MM:SS' or 'YYYY-MM-DD HH:MM:SS'
-  const m = s.match(/(\d{2}:\d{2}:\d{2})/);
-  return m ? m[1] : s;
-}
-function apptCombineScheduledAt(dateVal, timeVal) {
-  // Compose 'YYYY-MM-DD HH:MM:SS+00' from slot_date + slot_time. Caller
-  // is responsible for the timezone assumption — Vedadb stores TIMESTAMPTZ
-  // and the seed slots are clinic-local (UTC+0 here for simplicity).
-  const d = apptSlotDateOnly(dateVal) || '';
-  const t = apptSlotTimeOnly(timeVal) || '00:00:00';
-  return `${d} ${t}+00`;
-}
+// ============ MEDICATION ADHERENCE (Week 2 / B1) ============
+// Patient self-reports each scheduled dose as taken / missed / skipped.
+// Append-only log; rollups (streak, adherence_pct) are computed by the API.
 
-// GET /api/patient/appointment-slots?from=YYYY-MM-DD&to=YYYY-MM-DD&doctor_id=d-001
-app.get('/api/patient/appointment-slots', requirePatientAuth, async (req, res) => {
-  const { from, to, doctor_id } = req.query;
-  let q = `SELECT slot_id, doctor_id, clinic_id, slot_date, slot_time, duration_min, status
-           FROM appointment_slots WHERE status = 'open'`;
-  const esc = (v) => String(v).replace(/'/g, "''");
-  if (from) q += ` AND slot_date >= '${esc(from)}'`;
-  if (to) q += ` AND slot_date <= '${esc(to)}'`;
-  if (doctor_id) q += ` AND doctor_id = '${esc(doctor_id)}'`;
-  q += ' ORDER BY slot_date ASC, slot_time ASC LIMIT 200';
-  try {
-    const rows = await pool.query(q);
-    jsonRes(res, { slots: rows.rows.map(r => ({
-      slot_id: r[0], doctor_id: r[1], clinic_id: r[2],
-      slot_date: apptSlotDateOnly(r[3]),
-      slot_time: apptSlotTimeOnly(r[4]),
-      duration_min: parseInt(r[5], 10) || 15, status: r[6],
-    })) });
-  } catch (e) { errRes(res, e.message, 500); }
-});
+const ADHERENCE_STATUS = new Set(['taken', 'missed', 'skipped']);
+const ADHERENCE_SLOTS = new Set(['morning', 'afternoon', 'evening', 'night', 'custom']);
 
-// POST /api/patient/appointments  {slot_id, reason?, kind: 'in_person'|'tele'}
-app.post('/api/patient/appointments', requirePatientAuthCsrf, async (req, res) => {
+app.post('/api/patient/adherence', requirePatientAuthCsrf, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
-  const { slot_id, reason, kind } = req.body || {};
-  if (!slot_id) return errRes(res, 'slot_id required');
-  const safeSlot = String(slot_id).replace(/'/g, "''");
-  const safeReason = reason == null ? null : String(reason).replace(/'/g, "''");
-  const apptKind = apptKindOrDefault(kind);
-  const conn = await pool.acquire();
+  const {
+    drug_name, dose, schedule_slot, scheduled_at,
+    status, taken_at, notes, rx_id,
+  } = req.body || {};
+  if (!drug_name) return errRes(res, 'drug_name required');
+  if (!schedule_slot) return errRes(res, 'schedule_slot required');
+  if (!ADHERENCE_SLOTS.has(schedule_slot)) return errRes(res, 'schedule_slot must be one of morning|afternoon|evening|night|custom');
+  if (!scheduled_at) return errRes(res, 'scheduled_at required');
+  if (!status) return errRes(res, 'status required');
+  if (!ADHERENCE_STATUS.has(status)) return errRes(res, 'status must be one of taken|missed|skipped');
+
+  const adherence_id = 'ad-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  // VBP wire needs space-separated timestamp; trim TZ for safety.
+  const scheduledStr = String(scheduled_at).slice(0, 19).replace('T', ' ');
+  const takenStr = taken_at ? String(taken_at).slice(0, 19).replace('T', ' ') : null;
+  // Engine v1 does not honor DEFAULT values at INSERT time — supply the
+  // current_timestamp explicitly (matches the pattern used by /api/reminders).
+  const createdStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
   try {
-    await conn.query('BEGIN');
-    // 1. Look up slot — 404 if not found
-    const slotRes = await conn.query(
-      `SELECT slot_id, doctor_id, clinic_id, slot_date, slot_time, duration_min, status
-       FROM appointment_slots WHERE slot_id = '${safeSlot}'`
+    await pool.query(
+      `INSERT INTO med_adherence (adherence_id, patient_id, rx_id, drug_name, dose, schedule_slot, scheduled_at, taken_at, status, notes, created_at)
+       VALUES ('${adherence_id}', '${pid}', ${rx_id ? `'${String(rx_id).replace(/'/g, "''")}'` : 'NULL'},
+               '${String(drug_name).replace(/'/g, "''")}',
+               ${dose ? `'${String(dose).replace(/'/g, "''")}'` : 'NULL'},
+               '${schedule_slot}', '${scheduledStr}',
+               ${takenStr ? `'${takenStr}'` : 'NULL'},
+               '${status}',
+               ${notes ? `'${String(notes).replace(/'/g, "''")}'` : 'NULL'},
+               '${createdStr}')`
     );
-    if (slotRes.rows.length === 0) {
-      await conn.query('ROLLBACK');
-      return errRes(res, 'slot not found', 404, 'NOT_FOUND');
-    }
-    const s = slotRes.rows[0];
-    if (s[6] !== 'open') {
-      await conn.query('ROLLBACK');
-      return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
-    }
-    // 2. Insert appointment row first (so we have an appointment_id to
-    //    back-link to the slot in the conditional UPDATE).
-    const appointmentId = 'apt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-    const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const scheduledAt = apptCombineScheduledAt(s[3], s[4]);
-    const dur = s[5] || 15;
-    await conn.query(
-      `INSERT INTO appointments
-        (appointment_id, slot_id, patient_id, doctor_id, clinic_id, scheduled_at, duration_min, reason, kind, status, created_at, updated_at)
-       VALUES
-        ('${appointmentId}', '${safeSlot}', '${pid}', '${String(s[1]).replace(/'/g, "''")}',
-         ${s[2] ? `'${String(s[2]).replace(/'/g, "''")}'` : 'NULL'},
-         '${scheduledAt}', ${parseInt(dur, 10) || 15},
-         ${safeReason == null ? 'NULL' : `'${safeReason}'`},
-         '${apptKind}', 'booked', '${ts}', '${ts}')`
-    );
-    // 3. Conditional UPDATE — atomic guard against concurrent bookings.
-    //    If 0 rows matched, another request just took the slot. Rollback
-    //    the appointment INSERT and return 409.
-    //    Vedadb VBP quirk: r.rowsAffected is always 0 for UPDATE regardless
-    //    of actual match — parse commandTag instead ("N row(s) updated.").
-    const updRes = await conn.query(
-      `UPDATE appointment_slots SET status='booked', appointment_id='${appointmentId}'
-       WHERE slot_id = '${safeSlot}' AND status = 'open'`
-    );
-    const updMatch = (updRes.commandTag || '').match(/^(\d+)\s+row/);
-    if (!updMatch || parseInt(updMatch[1], 10) === 0) {
-      await conn.query('ROLLBACK');
-      return errRes(res, 'slot already taken', 409, 'SLOT_TAKEN');
-    }
-    await conn.query('COMMIT');
     await audit(pool, req, {
       actor_kind: 'patient', actor_id: pid, action: 'create',
-      resource_kind: 'appointment', resource_id: appointmentId,
-      diff_json: { slot_id, reason: safeReason, kind: apptKind },
+      resource_kind: 'med_adherence', resource_id: adherence_id,
+      diff_json: { drug_name, schedule_slot, scheduled_at, status },
     });
     jsonRes(res, {
-      appointment_id: appointmentId,
-      slot_id: s[0], patient_id: pid, doctor_id: s[1], clinic_id: s[2],
-      scheduled_at: scheduledAt, duration_min: parseInt(dur, 10) || 15,
-      reason: safeReason, kind: apptKind, status: 'booked',
+      adherence_id, patient_id: pid, drug_name, dose: dose || null,
+      schedule_slot, scheduled_at, taken_at: taken_at || null,
+      status, notes: notes || null, rx_id: rx_id || null,
     }, 201);
-  } catch (e) {
-    try { await conn.query('ROLLBACK'); } catch {}
-    errRes(res, e.message, 500);
-  } finally {
-    pool.release(conn);
-  }
-});
-
-// GET /api/patient/appointments  — patient's upcoming + recent
-app.get('/api/patient/appointments', requirePatientAuth, async (req, res) => {
-  const pid = req.patientSession.patient.patient_id;
-  try {
-    const rows = await pool.query(
-      `SELECT appointment_id, slot_id, patient_id, doctor_id, clinic_id,
-              scheduled_at, duration_min, reason, kind, status,
-              cancelled_at, cancel_reason, notes, created_at, updated_at
-       FROM appointments WHERE patient_id = '${pid}'
-       ORDER BY scheduled_at DESC LIMIT 100`
-    );
-    jsonRes(res, { appointments: rows.rows.map(r => ({
-      appointment_id: r[0], slot_id: r[1], patient_id: r[2], doctor_id: r[3],
-      clinic_id: r[4], scheduled_at: r[5], duration_min: parseInt(r[6], 10) || 15, reason: r[7],
-      kind: r[8], status: r[9], cancelled_at: r[10], cancel_reason: r[11],
-      notes: r[12], created_at: r[13], updated_at: r[14],
-    })) });
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-// POST /api/patient/appointments/:id/cancel  {cancel_reason?}
-app.post('/api/patient/appointments/:id/cancel', requirePatientAuthCsrf, async (req, res) => {
+// Helper: VBP returns NULL columns as the literal string 'NULL' (and Date
+// objects are also possible for TIMESTAMPTZ). Treat both as null and parse
+// valid timestamps to ISO. Anything else → null (don't crash the response).
+function vbpParseTs(v) {
+  if (v == null) return null;
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString();
+  const s = String(v).trim();
+  if (!s || s === 'NULL' || s === 'null') return null;
+  const d = new Date(s.replace(' ', 'T'));
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+app.get('/api/patient/adherence', requirePatientAuth, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
-  const apptId = String(req.params.id).replace(/'/g, "''");
-  const safeReason = req.body && req.body.cancel_reason != null
-    ? String(req.body.cancel_reason).replace(/'/g, "''")
-    : null;
-  const conn = await pool.acquire();
+  const { from, to, status } = req.query;
+  // Default window: last 30 days if no from/to.
+  const now = new Date();
+  const defaultFrom = new Date(now.getTime() - 30 * 86400 * 1000);
+  const fromStr = (from ? String(from) : defaultFrom.toISOString()).slice(0, 19).replace('T', ' ');
+  const toStr   = (to   ? String(to)   : now.toISOString()).slice(0, 19).replace('T', ' ');
+  const statusFilter = status && ADHERENCE_STATUS.has(status) ? `AND status = '${status}'` : '';
   try {
-    await conn.query('BEGIN');
-    // 1. Find appointment — must belong to this patient
-    const apptRes = await conn.query(
-      `SELECT appointment_id, slot_id, status FROM appointments
-       WHERE appointment_id = '${apptId}' AND patient_id = '${pid}'`
+    const rows = await pool.query(
+      `SELECT adherence_id, patient_id, rx_id, drug_name, dose, schedule_slot, scheduled_at, taken_at, status, notes, created_at
+         FROM med_adherence
+        WHERE patient_id = '${pid}'
+          AND scheduled_at >= '${fromStr}'
+          AND scheduled_at <= '${toStr}'
+          ${statusFilter}
+        ORDER BY scheduled_at DESC LIMIT 500`
     );
-    if (apptRes.rows.length === 0) {
-      await conn.query('ROLLBACK');
-      return errRes(res, 'appointment not found', 404, 'NOT_FOUND');
+    const out = rows.rows.map(r => ({
+      adherence_id: r[0], patient_id: r[1], rx_id: r[2], drug_name: r[3],
+      dose: r[4] && r[4] !== 'NULL' ? r[4] : null,
+      schedule_slot: r[5],
+      scheduled_at: vbpParseTs(r[6]),
+      taken_at: vbpParseTs(r[7]),
+      status: r[8] && r[8] !== 'NULL' ? r[8] : null,
+      notes: r[9] && r[9] !== 'NULL' ? r[9] : null,
+      created_at: vbpParseTs(r[10]),
+    }));
+
+    // Rollups: streak_days = number of consecutive days ending today where
+    // EVERY scheduled dose is 'taken' (missed/skipped resets the streak).
+    // adherence_pct = taken / (taken + missed + skipped) over the window.
+    const dayKey = (iso) => {
+      if (!iso) return null;
+      // iso is "YYYY-MM-DDTHH:MM:SS.sssZ" — date is the first 10 chars.
+      return iso.slice(0, 10);
+    };
+    const byDay = new Map();
+    for (const r of out) {
+      const k = dayKey(r.scheduled_at);
+      if (!k) continue;
+      const bucket = byDay.get(k) || { taken: 0, missed: 0, skipped: 0, any: false };
+      if (r.status === 'taken') bucket.taken++;
+      else if (r.status === 'missed') bucket.missed++;
+      else if (r.status === 'skipped') bucket.skipped++;
+      bucket.any = true;
+      byDay.set(k, bucket);
     }
-    const appt = apptRes.rows[0];
-    if (appt[2] === 'cancelled') {
-      await conn.query('ROLLBACK');
-      return errRes(res, 'already cancelled', 409, 'ALREADY_CANCELLED');
+    // Streak: walk back from today; stop at first day that is 'empty' OR has
+    // any missed/skipped.
+    let streak_days = 0;
+    const cursor = new Date(now.toISOString().slice(0, 10) + 'T00:00:00Z');
+    while (true) {
+      const k = cursor.toISOString().slice(0, 10);
+      const b = byDay.get(k);
+      if (!b || !b.any || b.missed > 0 || b.skipped > 0) break;
+      streak_days++;
+      cursor.setUTCDate(cursor.getUTCDate() - 1);
     }
-    const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    // 2. Mark appointment cancelled + free the slot back to 'open'.
-    //    Both UPDATEs commit together so a crash mid-cancel can't leave
-    //    the appointment cancelled but the slot still 'booked'.
-    await conn.query(
-      `UPDATE appointments SET status='cancelled', cancelled_at='${ts}',
-        cancel_reason=${safeReason == null ? 'NULL' : `'${safeReason}'`},
-        updated_at='${ts}' WHERE appointment_id = '${apptId}'`
-    );
-    if (appt[1]) {
-      await conn.query(
-        `UPDATE appointment_slots SET status='open', appointment_id=NULL
-         WHERE slot_id = '${String(appt[1]).replace(/'/g, "''")}'`
-      );
-    }
-    await conn.query('COMMIT');
-    await audit(pool, req, {
-      actor_kind: 'patient', actor_id: pid, action: 'cancel',
-      resource_kind: 'appointment', resource_id: apptId,
-      diff_json: { cancel_reason: safeReason },
-    });
+
+    let tTaken = 0, tMissed = 0, tSkipped = 0;
+    for (const b of byDay.values()) { tTaken += b.taken; tMissed += b.missed; tSkipped += b.skipped; }
+    const denom = tTaken + tMissed + tSkipped;
+    const adherence_pct = denom > 0 ? Math.round((tTaken / denom) * 100) : null;
+
     jsonRes(res, {
-      appointment_id: apptId, slot_id: appt[1], status: 'cancelled',
-      cancelled_at: ts, cancel_reason: safeReason,
+      rows: out,
+      streak_days,
+      adherence_pct,
+      window: { from: fromStr, to: toStr },
+      totals: { taken: tTaken, missed: tMissed, skipped: tSkipped },
     });
-  } catch (e) {
-    try { await conn.query('ROLLBACK'); } catch {}
-    errRes(res, e.message, 500);
-  } finally {
-    pool.release(conn);
-  }
+  } catch (e) { errRes(res, e.message, 500); }
+});
+
+app.get('/api/patient/adherence/today', requirePatientAuth, async (req, res) => {
+  const pid = req.patientSession.patient.patient_id;
+  // Today 00:00 UTC → tomorrow 00:00 UTC (exclusive upper bound).
+  const now = new Date();
+  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const tomorrow = new Date(todayStart.getTime() + 86400 * 1000);
+  const fromStr = todayStart.toISOString().slice(0, 19).replace('T', ' ');
+  const toStr   = tomorrow.toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    // Pull today's med_adherence rows; LEFT-JOIN reminders on the per-patient
+    // metformin reminder id so we can fall back to its title/body when the
+    // adherence row was created without drug_name/dose.
+    const rows = await pool.query(
+      `SELECT a.adherence_id, a.patient_id, a.rx_id, a.drug_name, a.dose, a.schedule_slot,
+              a.scheduled_at, a.taken_at, a.status, a.notes,
+              r.title, r.body
+         FROM med_adherence a
+         LEFT JOIN reminders r
+           ON r.reminder_id = 'r-' || a.patient_id || '-metformin'
+          AND r.patient_id = a.patient_id
+        WHERE a.patient_id = '${pid}'
+          AND a.scheduled_at >= '${fromStr}'
+          AND a.scheduled_at <  '${toStr}'
+        ORDER BY a.scheduled_at ASC`
+    );
+    const out = rows.rows.map(r => ({
+      adherence_id: r[0], patient_id: r[1], rx_id: r[2],
+      drug_name: r[3] && r[3] !== 'NULL' ? r[3]
+                : (r[10] && r[10] !== 'NULL' ? String(r[10]).replace(/^Take\s+/i, '').replace(/\s+\d.*$/, '').trim() : null)
+                || 'Unknown',
+      dose: r[4] && r[4] !== 'NULL' ? r[4] : null,
+      schedule_slot: r[5],
+      scheduled_at: vbpParseTs(r[6]),
+      taken_at: vbpParseTs(r[7]),
+      status: r[8] && r[8] !== 'NULL' ? r[8] : 'pending',
+      notes: r[9] && r[9] !== 'NULL' ? r[9] : null,
+      reminder_title: r[10] && r[10] !== 'NULL' ? r[10] : null,
+    }));
+    jsonRes(res, { rows: out, date: todayStart.toISOString().slice(0, 10) });
+  } catch (e) { errRes(res, e.message, 500); }
 });
 
 // ============ REMINDERS ============
