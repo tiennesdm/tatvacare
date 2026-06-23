@@ -1,6 +1,23 @@
-// TatvaCare server v3 — patient portal, i18n, LLM, RAG, telemedicine, audit, multi-tenancy
+// TatvaCare server v4 — production-readiness pass (P0..P2).
+//
+// What's new in v4 (see todo list in PR description for the full list):
+//   - Centralised config (lib/config.mjs) with boot-time validation.
+//   - Structured JSON logger with request-id propagation (lib/logger.mjs).
+//   - Prometheus text-format /metrics endpoint (lib/metrics.mjs).
+//   - /readyz endpoint separate from /api/health (liveness vs readiness).
+//   - AI service calls wrapped in AbortSignal.timeout + circuit breaker
+//     (lib/circuit.mjs) so a hung Python process can't pile up Node fetches.
+//   - Shared-secret service-to-service auth on every AI call (lib/ai_auth.mjs).
+//   - Graceful shutdown coordinator (lib/shutdown.mjs) handles SIGTERM
+//     (not just SIGINT) and drains in-flight requests before closing the
+//     VBP pool.
+//   - Zod-style body validation on critical write routes (lib/validate.mjs).
+//   - HIPAA §164.312(b) PHI access logger (lib/phi_access.mjs) writes every
+//     patient resource read/write to phi_access_log.
+
 import express from 'express';
 import { readFileSync, existsSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VBPPool } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/vbp.mjs';
@@ -17,6 +34,15 @@ import { augmentPrompt, retrieve as ragRetrieve } from '/Users/shubhammehta/Down
 import * as i18n from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/i18n.mjs';
 import * as remindersLib from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/reminders.mjs';
 
+import { config, logBootBanner } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/config.mjs';
+import { logger, accessLogMiddleware, errorLogMiddleware } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/logger.mjs';
+import { registry as metrics, renderMetrics, metricsMiddleware } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/metrics.mjs';
+import { aiBreaker, CircuitOpenError } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/circuit.mjs';
+import { buildServiceKeyHeader } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/ai_auth.mjs';
+import { ShutdownCoordinator } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/shutdown.mjs';
+import { phiAccessLogger, markPhiAccess } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs';
+import { validateBody, validateQuery, schemas } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/validate.mjs';
+
 // ============ SECURITY MIDDLEWARE (E1 rate limit, E2 helmet, E4 sanitize) ============
 import {
   buildHelmet,
@@ -28,10 +54,19 @@ import {
   csrfTokenFor,
 } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/security/index.mjs';
 
+// ============ BOOT BANNER (before Express so deploy logs catch it) ============
+logBootBanner();
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
 
 const app = express();
+
+// ============ OBSERVABILITY (must run FIRST so every request gets a request-id) ============
+// Generates x-request-id, propagates it via AsyncLocalStorage, logs a single
+// JSON access line per request on res.finish. Errors caught here are logged
+// and turned into a generic 500 — they don't leak stack traces to clients.
+app.use(accessLogMiddleware());
 
 // E2 — Security headers first (before everything else; helmet sets CSP, HSTS,
 // X-Frame-Options, Referrer-Policy, COOP, X-Content-Type-Options, hides
@@ -66,7 +101,20 @@ app.use('/api/ai', rateLimits.ai);
 app.use('/api', rateLimits.default);
 // vitals write limiter is applied per-route below (POST /api/vitals only).
 
-const pool = new VBPPool('127.0.0.1', 6381, 12);
+// Metrics — per-request http_requests_total + http_request_duration_seconds.
+// Mounted after routing (it's app.use, but req.route is only populated by
+// the router when the response finishes), so the labels work correctly.
+app.use(metricsMiddleware());
+
+const pool = new VBPPool(config.VBP_HOST, config.VBP_PORT, config.VBP_POOL_MAX);
+// Inject pool into metrics so /metrics can show vbp_pool_* gauges.
+globalThis.__tatvacare_metrics_deps = { pool };
+
+// HIPAA §164.312(b) — every patient-resource read/write goes here.
+// MUST be registered AFTER `const pool = ...` (the PHI logger needs pool
+// to insert rows; ES module const declarations don't hoist). Registering
+// before the const was a ReferenceError that took down the whole server.
+app.use(phiAccessLogger(pool));
 
 // ============ CSRF SECRET STORE ============
 // In-memory Map keyed by session id. Single-process Node so this is fine;
@@ -255,6 +303,7 @@ app.post('/api/patients', requireAuthCsrf, async (req, res) => {
   } catch (e) { errRes(res, e.message, 500); }
 });
 app.get('/api/patients/:id', requireAuth, async (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient', resource_id: req.params.id, patient_id: req.params.id });
   try { const p = await clinical.getPatientChart(pool, req.params.id); if (!p) return errRes(res, 'not found', 404); jsonRes(res, { patient: p }); }
   catch (e) { errRes(res, e.message, 500); }
 });
@@ -279,8 +328,13 @@ app.get('/api/prescriptions', requireAuth, async (req, res) => {
   catch (e) { errRes(res, e.message, 500); }
 });
 app.get('/api/prescriptions/:id', requireAuth, async (req, res) => {
-  try { const rx = await doc.getPrescription(pool, req.params.id); if (!rx) return errRes(res, 'not found', 404); if (rx.doctor_id !== req.session.doctor_id) return errRes(res, 'forbidden', 403); jsonRes(res, { prescription: rx }); }
-  catch (e) { errRes(res, e.message, 500); }
+  try {
+    const rx = await doc.getPrescription(pool, req.params.id);
+    if (!rx) return errRes(res, 'not found', 404);
+    if (rx.doctor_id !== req.session.doctor_id) return errRes(res, 'forbidden', 403);
+    markPhiAccess(req, { action: 'read', resource_kind: 'prescription', resource_id: req.params.id, patient_id: rx.patient_id });
+    jsonRes(res, { prescription: rx });
+  } catch (e) { errRes(res, e.message, 500); }
 });
 app.post('/api/prescriptions', requireAuthCsrf, async (req, res) => {
   try {
@@ -305,6 +359,7 @@ app.post('/api/drugs/check-interactions', requireAuthCsrf, async (req, res) => {
 
 // ============ VITALS ============
 app.get('/api/patients/:id/vitals', requireAuth, async (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient_vitals_log', patient_id: req.params.id });
   try { const vitals = await clinical.listVitals(pool, req.params.id, req.query.type); jsonRes(res, { vitals }); }
   catch (e) { errRes(res, e.message, 500); }
 });
@@ -369,6 +424,7 @@ app.get('/api/formulary/for-indication', requireAuth, (req, res) => {
 
 // ============ PATIENT NOTES ============
 app.get('/api/patients/:id/notes', requireAuth, async (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient_notes', patient_id: req.params.id });
   try {
     const r = await pool.query(`SELECT note_id, patient_id, doctor_id, note_type, body, is_pinned, created_at, updated_at FROM patient_notes WHERE patient_id = ${doc.sqlStr ? doc.sqlStr(req.params.id) : `'${req.params.id.replace(/'/g, "''")}'`} ORDER BY is_pinned DESC, created_at DESC`);
     const notes = (r.rows || []).map(row => ({
@@ -406,6 +462,7 @@ app.get('/api/prescriptions/:id/pdf', requireAuth, async (req, res) => {
     const rx = await doc.getPrescription(pool, req.params.id);
     if (!rx) return errRes(res, 'not found', 404);
     if (rx.doctor_id !== req.session.doctor_id) return errRes(res, 'forbidden', 403);
+    markPhiAccess(req, { action: 'export', resource_kind: 'prescription_pdf', resource_id: req.params.id, patient_id: rx.patient_id });
     const patient = await doc.getPatient(pool, rx.patient_id);
     if (!patient) return errRes(res, 'patient not found', 404);
     const fullDoctor = await doc.getDoctor(pool, req.session.doctor_id);
@@ -419,13 +476,116 @@ app.get('/api/prescriptions/:id/pdf', requireAuth, async (req, res) => {
 });
 
 // ============ HEALTH ============
+// /api/health     — liveness. Returns 200 if the process is alive and can
+//                   reach Vedadb. Cheap (SELECT 1). Used by Docker HEALTHCHECK
+//                   and by load balancers for "is this process responding".
+// /readyz         — readiness. Returns 200 only if (a) Vedadb is reachable,
+//                   (b) AI service is reachable (or breaker is half-open),
+//                   (c) shutdown is NOT in progress. Used by k8s readiness
+//                   probe so traffic stops arriving BEFORE we close the
+//                   pool. Returns 503 during graceful shutdown.
+// /metrics        — Prometheus text exposition. NOT authenticated by design
+//                   (cluster-internal scrape). Restrict via network policy
+//                   in production.
+let shuttingDown = false;
 app.get('/api/health', async (req, res) => {
-  try { const pong = await pool.query('SELECT 1 AS ok'); const r = pong.rows[0]?.[0]; jsonRes(res, { status: r === '1' ? 'ok' : 'degraded', vbp: '127.0.0.1:6381' }); }
-  catch (e) { errRes(res, e.message, 500, 'VBP_DOWN'); }
+  try {
+    const pong = await pool.query('SELECT 1 AS ok');
+    const r = pong.rows[0]?.[0];
+    jsonRes(res, {
+      status: r === '1' ? 'ok' : 'degraded',
+      vbp: `${config.VBP_HOST}:${config.VBP_PORT}`,
+      pool: pool._stats(),
+      uptime_seconds: Math.floor(process.uptime()),
+    });
+  } catch (e) {
+    res.status(503).json({ status: 'unhealthy', vbp: 'down', error: e.message });
+  }
 });
 
+app.get('/readyz', async (req, res) => {
+  if (shuttingDown) return res.status(503).json({ ready: false, reason: 'shutting_down' });
+  const checks = { vbp: 'unknown', ai: 'unknown' };
+  let ready = true;
+  try {
+    const pong = await pool.query('SELECT 1 AS ok');
+    checks.vbp = pong.rows[0]?.[0] === '1' ? 'ok' : 'degraded';
+    if (checks.vbp !== 'ok') ready = false;
+  } catch (e) {
+    checks.vbp = 'down';
+    ready = false;
+  }
+  // AI check is best-effort; the breaker itself is enough signal in prod.
+  if (aiBreaker.state === 'OPEN') {
+    checks.ai = 'circuit_open';
+    // Don't mark not-ready on AI breaker — many endpoints don't need AI.
+    // If you want stricter readiness, flip this to `ready = false`.
+  } else {
+    try {
+      const r = await fetch(`${AI_URL}/health`, { signal: AbortSignal.timeout(2000) });
+      checks.ai = r.ok ? 'ok' : `http_${r.status}`;
+    } catch (e) {
+      checks.ai = 'down';
+    }
+  }
+  res.status(ready ? 200 : 503).json({ ready, checks, circuit: aiBreaker.snapshot() });
+});
+
+if (config.METRICS_ENABLED) {
+  app.get('/metrics', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(renderMetrics());
+  });
+}
+
 // ============ AI SERVICE PROXY (Python FastAPI on :7100) ============
-const AI_URL = process.env.AI_URL || 'http://127.0.0.1:7100';
+// Every AI call goes through aiFetch() which:
+//   - signs the request with X-Service-Key + X-Service-Nonce (lib/ai_auth)
+//   - enforces a hard timeout via AbortSignal.timeout(config.AI_FETCH_TIMEOUT_MS)
+//   - runs through the circuit breaker (lib/circuit.mjs)
+//   - emits a metrics counter per (endpoint, outcome)
+const AI_URL = config.AI_URL;
+async function aiFetch(aiPath, init = {}) {
+  const endpoint = aiPath.replace(/\?.*$/, '').replace(/[^a-z0-9]+/gi, '_') || 'unknown';
+  const headers = {
+    'Content-Type': 'application/json',
+    ...buildServiceKeyHeader(config.AI_SERVICE_KEY),
+    ...(init.headers || {}),
+  };
+  // When init.body is a stream (req itself for multipart), don't pre-stringify.
+  const initWithTimeout = { ...init, headers, signal: init.signal || AbortSignal.timeout(config.AI_FETCH_TIMEOUT_MS) };
+  return aiBreaker.exec(async () => {
+    let r;
+    try {
+      r = await fetch(`${AI_URL}${aiPath}`, initWithTimeout);
+    } catch (e) {
+      const outcome = e.name === 'TimeoutError' || e.name === 'AbortError' ? 'timeout' : 'network_error';
+      metrics.aiCalls.inc({ endpoint, outcome });
+      throw e;
+    }
+    if (r.status >= 500) {
+      metrics.aiCalls.inc({ endpoint, outcome: '5xx' });
+      const err = new Error(`AI ${endpoint} ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
+    if (!r.ok) {
+      metrics.aiCalls.inc({ endpoint, outcome: '4xx' });
+    } else {
+      metrics.aiCalls.inc({ endpoint, outcome: 'ok' });
+    }
+    return r;
+  }).catch((e) => {
+    if (e instanceof CircuitOpenError) {
+      // Convert breaker-open into a clean 503 the client can retry.
+      const err = new Error('AI service temporarily unavailable');
+      err.status = 503;
+      err.code = 'AI_CIRCUIT_OPEN';
+      throw err;
+    }
+    throw e;
+  });
+}
 
 // OCR
 app.post('/api/ai/ocr/prescription', requireAuthCsrf, async (req, res) => {
@@ -433,13 +593,9 @@ app.post('/api/ai/ocr/prescription', requireAuthCsrf, async (req, res) => {
     const { image } = req.body; // base64 data URL or raw base64
     if (!image) return errRes(res, 'image required');
     const b64 = image.replace(/^data:image\/\w+;base64,/, '');
-    const r = await fetch(`${AI_URL}/ocr/prescription`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64 }),
-    });
+    const r = await aiFetch('/ocr/prescription', { method: 'POST', body: JSON.stringify({ image: b64 }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.post('/api/ai/ocr/lab-report', requireAuthCsrf, async (req, res) => {
@@ -447,136 +603,107 @@ app.post('/api/ai/ocr/lab-report', requireAuthCsrf, async (req, res) => {
     const { image } = req.body;
     if (!image) return errRes(res, 'image required');
     const b64 = image.replace(/^data:image\/\w+;base64,/, '');
-    const r = await fetch(`${AI_URL}/ocr/lab-report`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: b64 }),
-    });
+    const r = await aiFetch('/ocr/lab-report', { method: 'POST', body: JSON.stringify({ image: b64 }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 // NLP — extract entities / suggest ICD-10
 app.post('/api/ai/nlp/entities', requireAuthCsrf, async (req, res) => {
   try {
     const { text } = req.body;
-    const r = await fetch(`${AI_URL}/nlp/extract-entities`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text || '' }),
-    });
+    const r = await aiFetch('/nlp/extract-entities', { method: 'POST', body: JSON.stringify({ text: text || '' }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.post('/api/ai/nlp/icd10', requireAuthCsrf, async (req, res) => {
   try {
     const { text, top_k } = req.body;
-    const r = await fetch(`${AI_URL}/nlp/suggest-icd10`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text || '', top_k: top_k || 5 }),
-    });
+    const r = await aiFetch('/nlp/suggest-icd10', { method: 'POST', body: JSON.stringify({ text: text || '', top_k: top_k || 5 }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-// Voice — proxy multipart
-import('node:buffer').then(() => {});
-
+// Voice — proxy multipart. Forward raw stream; aiFetch passes through signal.
 app.post('/api/ai/voice/transcribe', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
     if (!ct.includes('multipart/form-data')) return errRes(res, 'multipart/form-data required');
-    // Forward the raw body as multipart to AI service
-    const r = await fetch(`${AI_URL}/voice/transcribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': ct },
-      body: req,
-    });
+    const r = await aiFetch('/voice/transcribe', { method: 'POST', headers: { 'Content-Type': ct }, body: req });
     const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader('Content-Type', r.headers.get('content-type') || 'application/json');
     res.send(buf);
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 // ML — risk / anomaly / forecast
 app.post('/api/ai/ml/risk', requireAuthCsrf, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/ml/risk`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ patient_id: req.body.patient_id }),
-    });
+    const r = await aiFetch('/ml/risk', { method: 'POST', body: JSON.stringify({ patient_id: req.body.patient_id }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.post('/api/ai/ml/anomaly', requireAuthCsrf, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/ml/anomaly`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ patient_id: req.body.patient_id, metric: req.body.metric || 'systolic' }),
-    });
+    const r = await aiFetch('/ml/anomaly', { method: 'POST', body: JSON.stringify({ patient_id: req.body.patient_id, metric: req.body.metric || 'systolic' }) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-app.post('/api/ai/ml/forecast', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/ml/forecast', requireAuthCsrf, validateBody(schemas.mlForecast), async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/ml/forecast`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const r = await aiFetch('/ml/forecast', {
+      method: 'POST',
       body: JSON.stringify({
         patient_id: req.body.patient_id,
         metric: req.body.metric || 'systolic',
         horizon_days: req.body.horizon_days || 7,
       }),
     });
+    markPhiAccess(req, { action: 'read', resource_kind: 'ml_forecast', patient_id: req.body.patient_id });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 // Agents
 app.post('/api/ai/agents/run', requireAuthCsrf, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/agents/run`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
-    });
+    const r = await aiFetch('/agents/run', { method: 'POST', body: JSON.stringify(req.body) });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.get('/api/ai/agents/activity', requireAuth, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/agents/activity?limit=${parseInt(req.query.limit) || 20}`);
+    const r = await aiFetch(`/agents/activity?limit=${parseInt(req.query.limit) || 20}`);
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.get('/api/ai/agents/list', requireAuth, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/agents/list`);
+    const r = await aiFetch('/agents/list');
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-// DL — ECG + retinopathy
+// DL — ECG + retinopathy (binary upload)
 app.post('/api/ai/dl/ecg', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
-    const r = await fetch(`${AI_URL}/dl/ecg/classify`, {
-      method: 'POST', headers: { 'Content-Type': ct }, body: req,
-    });
+    const r = await aiFetch('/dl/ecg/classify', { method: 'POST', headers: { 'Content-Type': ct }, body: req });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 app.post('/api/ai/dl/retinopathy', requireAuthCsrf, async (req, res) => {
   try {
     const ct = req.headers['content-type'] || '';
-    const r = await fetch(`${AI_URL}/dl/retinopathy/screen`, {
-      method: 'POST', headers: { 'Content-Type': ct }, body: req,
-    });
+    const r = await aiFetch('/dl/retinopathy/screen', { method: 'POST', headers: { 'Content-Type': ct }, body: req });
     jsonRes(res, await r.json());
-  } catch (e) { errRes(res, 'AI service error: ' + e.message, 502); }
+  } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
 // ============ CLINICS (multi-tenancy) ============
@@ -596,21 +723,14 @@ app.get('/api/clinics/:id/doctors', requireAuth, async (req, res) => {
   })) });
 });
 
-// AI service status
+// AI service status — single canonical route (the previous file had this
+// route defined twice; second definition was unreachable).
 app.get('/api/ai/status', requireAuth, async (req, res) => {
   try {
-    const r = await fetch(`${AI_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    const r = await aiFetch('/health', { method: 'GET' });
     jsonRes(res, await r.json());
   } catch (e) {
-    jsonRes(res, { status: 'down', error: e.message });
-  }
-});// ============ ADMIN UI ============
-app.get('/api/ai/status', requireAuth, async (req, res) => {
-  try {
-    const r = await fetch(`${AI_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    jsonRes(res, await r.json());
-  } catch (e) {
-    jsonRes(res, { status: 'down', error: e.message });
+    jsonRes(res, { status: 'down', error: e.message, circuit: aiBreaker.snapshot() });
   }
 });
 
@@ -631,17 +751,16 @@ const requirePatientAuth = async (req, res, next) => {
   // because that flow is the first end-to-end test of patient + CSRF.
   const sess = await getPatientSession(req);
   if (!sess) return errRes(res, 'unauthorized', 401, 'UNAUTHORIZED');
-  // Mirror the doctor getSession wrapper (lines 98-105) — bind the per-
-  // session CSRF secret so the downstream requireCsrf middleware can verify
-  // the x-csrf-token header against the same secret bound at login time.
-  // Without this, every state-changing patient route would 401 with
-  // "no session for CSRF check" (csrf.mjs line 137-140).
-  sess.csrfSecret = lookupCsrfSecret(sid);
+  // getPatientSession already attached csrfSecret from the in-memory store
+  // (see helpers block above). Do NOT re-bind here — a previous version
+  // had `sess.csrfSecret = lookupCsrfSecret(sid);` where `sid` was undefined,
+  // which threw a ReferenceError on every patient request. The helpers
+  // path is the single source of truth.
   req.patientSession = sess;
   next();
 };
 
-app.post('/api/patient/auth/login', async (req, res) => {
+app.post('/api/patient/auth/login', validateBody(schemas.patientLogin), async (req, res) => {
   const { phoneOrEmail, password } = req.body || {};
   if (!phoneOrEmail || !password) return errRes(res, 'phoneOrEmail and password required');
   const phone = phoneOrEmail.includes('@') ? null : phoneOrEmail;
@@ -676,8 +795,9 @@ app.get('/api/patient/auth/me', requirePatientAuth, (req, res) => {
 });
 
 app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
-  // Full chart for the logged-in patient
   const pid = req.patientSession.patient.patient_id;
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient', resource_id: pid, patient_id: pid });
+  // Full chart for the logged-in patient
   try {
     const patient = await doc.getPatient(pool, pid);
     const problems = (await clinical.getPatientProblems(pool, pid)).map(r => ({
@@ -703,7 +823,7 @@ app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-app.post('/api/patient/vitals', requirePatientAuthCsrf, async (req, res) => {
+app.post('/api/patient/vitals', requirePatientAuthCsrf, validateBody(schemas.patientVitals), async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
   const { metric, value, unit, notes } = req.body || {};
   if (!metric || value === undefined) return errRes(res, 'metric + value required');
@@ -728,6 +848,7 @@ app.post('/api/patient/vitals', requirePatientAuthCsrf, async (req, res) => {
 
 app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient_vitals_log', patient_id: pid });
   const rows = await pool.query(
     `SELECT log_id, metric, value, unit, recorded_at, flagged, notes FROM patient_vitals_log WHERE patient_id = '${pid}' ORDER BY recorded_at DESC LIMIT 200`
   );
@@ -743,7 +864,7 @@ app.get('/api/patient/vitals', requirePatientAuth, async (req, res) => {
 const ADHERENCE_STATUS = new Set(['taken', 'missed', 'skipped']);
 const ADHERENCE_SLOTS = new Set(['morning', 'afternoon', 'evening', 'night', 'custom']);
 
-app.post('/api/patient/adherence', requirePatientAuthCsrf, async (req, res) => {
+app.post('/api/patient/adherence', requirePatientAuthCsrf, validateBody(schemas.patientAdherence), async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
   const {
     drug_name, dose, schedule_slot, scheduled_at,
@@ -802,6 +923,7 @@ function vbpParseTs(v) {
 
 app.get('/api/patient/adherence', requirePatientAuth, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
+  markPhiAccess(req, { action: 'read', resource_kind: 'med_adherence', patient_id: pid });
   const { from, to, status } = req.query;
   // Default window: last 30 days if no from/to.
   const now = new Date();
@@ -878,6 +1000,7 @@ app.get('/api/patient/adherence', requirePatientAuth, async (req, res) => {
 
 app.get('/api/patient/adherence/today', requirePatientAuth, async (req, res) => {
   const pid = req.patientSession.patient.patient_id;
+  markPhiAccess(req, { action: 'read', resource_kind: 'med_adherence', patient_id: pid });
   // Today 00:00 UTC → tomorrow 00:00 UTC (exclusive upper bound).
   const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -1199,28 +1322,56 @@ app.post('/api/ai/agents/llm', requireAuthCsrf, async (req, res) => {
   // LLM-powered version of the existing agents — proxy to Python with LLM augmentation
   const { agent, ...body } = req.body || {};
   if (!agent) return errRes(res, 'agent required');
-  // First get the rule-based result from Python
-  const r = await fetch(`${AI_URL}/agents/run`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agent, ...body }),
-  });
-  const baseResult = await r.json();
-  if (!llmEnabled()) return jsonRes(res, { method: 'rules_only', result: baseResult });
-  // Try to augment with LLM
+  // First get the rule-based result from Python (via the shared aiFetch so
+  // it gets the timeout + breaker + service-key treatment).
   try {
-    const enhanced = await aiAgent(agent, body, req);
-    jsonRes(res, { method: 'llm_enhanced', result: baseResult, llm_enhancement: enhanced });
+    const r = await aiFetch('/agents/run', { method: 'POST', body: JSON.stringify({ agent, ...body }) });
+    const baseResult = await r.json();
+    if (!llmEnabled()) return jsonRes(res, { method: 'rules_only', result: baseResult });
+    try {
+      const enhanced = await aiAgent(agent, body, req);
+      jsonRes(res, { method: 'llm_enhanced', result: baseResult, llm_enhancement: enhanced });
+    } catch (e) {
+      await logUsage(pool, { feature: agent, status: 'error', error: e.message });
+      jsonRes(res, { method: 'rules_with_llm_error', result: baseResult, llm_error: e.message });
+    }
   } catch (e) {
-    await logUsage(pool, { feature: agent, status: 'error', error: e.message });
-    jsonRes(res, { method: 'rules_with_llm_error', result: baseResult, llm_error: e.message });
+    errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR');
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`[tatvacare] listening on http://127.0.0.1:${PORT}`);
-  console.log(`[tatvacare] VBP pool → 127.0.0.1:6381 (12 conns max)`);
-  console.log(`[tatvacare] PG-wire: NOT USED (per user policy)`);
+// ============ STARTUP + GRACEFUL SHUTDOWN ============
+// Use the raw http.createServer so we own the listen() / close() lifecycle.
+// app.listen() creates its own server and never lets us gracefully drain —
+// the prior version caught SIGTERM but only as `await pool.closeAll()` then
+// hard exit(0), which severs every in-flight request mid-write and can
+// corrupt Vedadb state.
+const httpServer = createServer(app);
+const PORT = config.PORT;
+const HOST = config.HOST;
+
+// in-flight request tracker — ShutdownCoordinator polls this every 2s during
+// graceful shutdown so we know when it's safe to close the pool.
+let inFlight = 0;
+httpServer.on('request', (req, res) => {
+  inFlight++;
+  res.on('finish', () => inFlight--);
+  res.on('close', () => inFlight--);
 });
-process.on('SIGINT', async () => { await pool.closeAll(); process.exit(0); });
-process.on('SIGTERM', async () => { await pool.closeAll(); process.exit(0); });
+
+httpServer.listen(PORT, HOST, () => {
+  // Keep one human-readable line for grep-ability in deploy logs.
+  logger.info('listening', { url: `http://${HOST}:${PORT}`, vbp: `${config.VBP_HOST}:${config.VBP_PORT}` });
+});
+
+const shutdown = new ShutdownCoordinator({
+  httpServer,
+  graceMs: config.SHUTDOWN_GRACE_MS,
+  inFlight: () => inFlight,
+  onDraining: async () => { shuttingDown = true; },
+  onCleanup: async () => {
+    // Close VBP pool last so the in-flight requests can still hit it.
+    try { await pool.closeAll(); } catch (e) { logger.warn('pool_close_err', { err: e?.message }); }
+  },
+});
+shutdown.install();

@@ -205,4 +205,15 @@ export class VBPPool {
     finally { this.release(c); }
   }
   async closeAll() { for (const c of this.free) await c.close(); this.free = []; }
+  /** Snapshot for metrics + health endpoints. */
+  _stats() {
+    return {
+      host: this.host,
+      port: this.port,
+      max: this.max,
+      in_use: this.busy.size,
+      free: this.free.length,
+      total: this.busy.size + this.free.length,
+    };
+  }
 }
