@@ -1,4 +1,32 @@
 // TatvaCare v2 — sidebar layout, toasts, modals, autocomplete, tabs
+//
+// Boot-time: ensure runtime-config.js + sw-update.js are loaded.
+// runtime-config.js sets window.__TC_CONFIG__ BEFORE this file runs
+// (loaded via <script> tag in every HTML page, OR injected below as a
+// fallback). sw-update.js registers the service worker after DOMContentLoaded.
+(function ensureDeps() {
+  // If runtime-config didn't load (older HTML pages that don't reference it),
+  // inline the defaults so the rest of this file can read window.__TC_CONFIG__.
+  if (!window.__TC_CONFIG__) {
+    window.__TC_CONFIG__ = { apiBase: '/api', enableSW: true, buildId: 'dev', env: 'development' };
+  }
+  // Lazy-load sw-update.js after DOMContentLoaded so the toast helpers
+  // it calls (showToast from this file) are defined. Skip if explicitly
+  // disabled by config (e.g. embedded preview windows).
+  if (window.__TC_CONFIG__.enableSW !== false) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', injectSW);
+    } else {
+      injectSW();
+    }
+  }
+  function injectSW() {
+    const s = document.createElement('script');
+    s.src = '/static/sw-update.js';
+    s.defer = true;
+    document.head.appendChild(s);
+  }
+})();
 const SVG = (path) => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon">${path}</svg>`;
 const ICONS = {
   dashboard: SVG('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>'),
@@ -52,6 +80,10 @@ let _csrfMissingWarned = false;
 //     cookie is present. Missing cookie on a POST/PUT/PATCH/DELETE logs a
 //     one-time warning and proceeds — the backend will 403 csrf_invalid, which
 //     is the right signal to the caller.
+//   - prepends `window.__TC_CONFIG__.apiBase` (default '/api') to the path
+//     so the same HTML works in dev (same origin :3000), staging (api.* subdomain),
+//     and prod (path-based reverse proxy). Pass `apiBase: false` in opts to
+//     skip the prefix (e.g. for absolute URLs to a CDN).
 const API = {
   async req(path, opts = {}) {
     const method = (opts.method || 'GET').toUpperCase();
@@ -65,7 +97,15 @@ const API = {
         console.warn('[TatvaCare] csrf_token cookie missing — state-changing requests will 403. Are you logged in?');
       }
     }
-    const r = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
+    // Resolve URL. If caller passes an absolute URL (http(s)://...), use it
+    // as-is. Otherwise prepend the runtime apiBase so the same page works
+    // against any backend origin (dev :3000, prod api.tatvacare.in, etc).
+    let url = path;
+    if (opts.apiBase !== false && !/^https?:\/\//i.test(path)) {
+      const base = (window.__TC_CONFIG__ && window.__TC_CONFIG__.apiBase) || '/api';
+      url = base.replace(/\/$/, '') + (path.startsWith('/') ? path : '/' + path);
+    }
+    const r = await fetch(url, { ...opts, headers, credentials: 'same-origin' });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error?.message || `HTTP ${r.status}`);
     return data;

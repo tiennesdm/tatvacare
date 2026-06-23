@@ -1,0 +1,115 @@
+# TatvaCare full-stack compose for local prod-like testing.
+#
+# Topology (single host):
+#   - edadb    : Vedadb engine binary on :6381 (VBP) + :8130 (admin)
+#   - backend  : Node Express on :3000, depends_on edadb + ai
+#   - ai       : Python FastAPI on :7100, depends_on edadb
+#   - redis    : optional — only needed for multi-process CSRF/rate-limit
+#
+# Note: this compose is for LOCAL PRODUCTION-LIKE testing only. Real
+# production should run on k8s / ECS / Nomad with proper ingress, TLS,
+# secret management, and observability (Prom + Grafana + Loki).
+#
+# Usage:
+#   1. Build images:  docker compose build
+#   2. Bring up:      docker compose up -d
+#   3. Tail logs:     docker compose logs -f backend
+#   4. Smoke test:    curl http://localhost:3000/api/health
+#   5. Stop:          docker compose down -v   (the -v wipes edadb-data)
+#
+# Secrets — for local testing we put dev values in the .env file. In prod
+# these come from the orchestrator's secret store (k8s secrets, AWS SM).
+
+services:
+  edadb:
+    image: tatvacare/edadb:latest       # Build from tiennesdm/vedadb-engine
+    container_name: tatvacare-edadb
+    ports:
+      - "6381:6381"
+      - "8130:8130"
+    volumes:
+      - edadb-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "edadb --health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: tatvacare-backend:latest
+    container_name: tatvacare-backend
+    depends_on:
+      edadb:
+        condition: service_healthy
+      ai:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      VBP_HOST: edadb
+      VBP_PORT: "6381"
+      AI_URL: "http://ai:7100"
+      AI_SERVICE_KEY: "${AI_SERVICE_KEY:?AI_SERVICE_KEY must be set in .env}"
+      SESSION_COOKIE_SECRET: "${SESSION_COOKIE_SECRET:?SESSION_COOKIE_SECRET must be set in .env}"
+      SHUTDOWN_GRACE_MS: "15000"
+      METRICS_ENABLED: "true"
+      PHI_ACCESS_LOG_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  ai:
+    build:
+      context: .
+      dockerfile: ai/Dockerfile
+    image: tatvacare-ai:latest
+    container_name: tatvacare-ai
+    depends_on:
+      edadb:
+        condition: service_healthy
+    ports:
+      - "7100:7100"
+    environment:
+      AI_SERVICE_KEY: "${AI_SERVICE_KEY:?AI_SERVICE_KEY must be set in .env}"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ai-models:/home/app/.cache     # persist downloaded models between restarts
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7100/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+
+  redis:
+    # Only required for multi-process / multi-host deploys. Single-process
+    # Node uses the in-memory rate-limit + CSRF stores. Enable this service
+    # AND set REDIS_URL in backend env to switch over.
+    image: redis:7-alpine
+    container_name: tatvacare-redis
+    profiles: ["multi-process"]          # opt-in: `docker compose --profile multi-process up`
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  edadb-data:
+  ai-models:
