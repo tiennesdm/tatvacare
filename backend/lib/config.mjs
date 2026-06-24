@@ -47,8 +47,11 @@ function optBool(name, dflt) {
 const NODE_ENV = optStr('NODE_ENV', 'development');
 
 // === HTTP server ===
+// Default HOST is 0.0.0.0 so the server accepts connections on every
+// interface — required for Docker / k8s. For local dev where you only
+// want loopback, set HOST=127.0.0.1 in your shell / .env.
 const PORT = optInt('PORT', 3000, { min: 1, max: 65535 });
-const HOST = optStr('HOST', '127.0.0.1');
+const HOST = optStr('HOST', '0.0.0.0');
 const SHUTDOWN_GRACE_MS = optInt('SHUTDOWN_GRACE_MS', 15_000, { min: 1_000, max: 60_000 });
 
 // === Vedadb VBP ===

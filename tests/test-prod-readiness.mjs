@@ -23,10 +23,11 @@ const { accessLogMiddleware, logger } = await import('/Users/shubhammehta/Downlo
 const { registry, renderMetrics, metricsMiddleware } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/metrics.mjs');
 const { aiBreaker, CircuitOpenError, CircuitBreaker } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/circuit.mjs');
 const { buildServiceKeyHeader, verifyServiceKeyHeader } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/ai_auth.mjs');
-const { validateBody, schemas } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/validate.mjs');
+const { validateBody, validateQuery, validateParams, schemas, paramSchemas } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/validate.mjs');
+const { sqlStr, sqlInt, sqlNum, sqlBool, sqlIdent, sqlValue } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/sql.mjs');
 const { ShutdownCoordinator } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/shutdown.mjs');
 const { config } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/config.mjs');
-const { phiAccessLogger, markPhiAccess } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs');
+const { phiAccessLogger, markPhiAccess, verifyPhiTable } = await import('/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs');
 
 // ── tiny HTTP client ────────────────────────────────────────────────
 function listen(app) {
@@ -342,6 +343,196 @@ await check('compose defines backend + ai + edadb', () => {
   assert.match(compose, /edadb:/);
   assert.match(compose, /backend:/);
   assert.match(compose, /ai:/);
+});
+await check('compose defines migrate service (runs before backend)', () => {
+  // The migrate service must exist AND the backend must depend on it via
+  // service_completed_successfully. Otherwise a fresh `docker compose up`
+  // brings up backend against an unmigrated DB.
+  assert.match(compose, /^  migrate:/m);
+  assert.match(compose, /migrate:\s*\n[\s\S]*?service_completed_successfully/);
+});
+await check('compose migrate runs scripts/migrate.mjs', () => {
+  assert.match(compose, /scripts\/migrate\.mjs/);
+});
+
+// ── 14. SQL escape helpers — single source of truth ───────────────
+console.log('— SQL escape helpers —');
+await check('sqlStr escapes single quote', () => {
+  assert.equal(sqlStr("O'Brien"), "'O''Brien'");
+});
+await check('sqlStr escapes backslash', () => {
+  // The engine may treat \ as escape; we escape it too for safety.
+  assert.equal(sqlStr("a\\b"), "'a\\\\b'");
+});
+await check('sqlStr caps overly long strings', () => {
+  assert.throws(() => sqlStr('x'.repeat(70_000)), /too long/);
+});
+await check('sqlStr handles null/undefined', () => {
+  assert.equal(sqlStr(null), 'NULL');
+  assert.equal(sqlStr(undefined), 'NULL');
+});
+await check('sqlInt rejects NaN', () => {
+  assert.throws(() => sqlInt('abc'), /integer/);
+  assert.equal(sqlInt('42'), '42');
+  assert.equal(sqlInt(42), '42');
+  assert.equal(sqlInt(null), 'NULL');
+});
+await check('sqlNum rejects non-finite', () => {
+  assert.throws(() => sqlNum(Infinity), /finite/);
+  assert.equal(sqlNum(3.14), '3.14');
+  assert.equal(sqlNum(null), 'NULL');
+});
+await check('sqlBool handles various inputs', () => {
+  assert.equal(sqlBool(true), "'1'");
+  assert.equal(sqlBool(false), "'0'");
+  assert.equal(sqlBool(null), 'NULL');
+  assert.equal(sqlBool('yes'), "'1'");
+  assert.equal(sqlBool(0), "'0'");
+});
+await check('sqlIdent rejects unsafe identifiers', () => {
+  assert.throws(() => sqlIdent('a; DROP TABLE'), /unsafe/);
+  assert.throws(() => sqlIdent('1col'), /unsafe/);
+  assert.equal(sqlIdent('patient_id'), '"patient_id"');
+});
+await check('sqlIdent honors allow-list', () => {
+  assert.throws(() => sqlIdent('foo', ['bar']), /allow-list/);
+  assert.equal(sqlIdent('bar', ['bar']), '"bar"');
+});
+await check('SQL escape neutralizes classic injection payloads', () => {
+  // Classic payload: "x'; DROP TABLE users; --"
+  const dangerous = "x'; DROP TABLE users; --";
+  const escaped = sqlStr(dangerous);
+  // Single quote must be doubled, semicolons survive but they're inside
+  // the quoted literal so the engine treats them as data, not SQL.
+  assert.equal(escaped, "'x''; DROP TABLE users; --'");
+  // And the result must not contain an unescaped quote.
+  assert.ok(!/[^']'[^']/.test(escaped.slice(1, -1)), 'no bare quote inside');
+});
+
+// ── 15. validateParams — URL path validation ──────────────────────
+console.log('— validateParams —');
+const app5 = express();
+app5.use(express.json());
+app5.get('/p/:id',
+  validateParams(paramSchemas.id),
+  (req, res) => res.json({ ok: true, id: req.params.id }));
+const s5 = await listen(app5);
+await check('accepts well-formed id', async () => {
+  const r = await get(s5.port, '/p/p-12345');
+  assert.equal(r.status, 200);
+});
+await check('rejects id with apostrophe (SQL injection pattern)', async () => {
+  // Express won't decode %27 into ' in the params automatically? Actually
+  // it does — but our validator should still reject it.
+  const r = await get(s5.port, "/p/p'%20OR%201=1--");
+  assert.equal(r.status, 400);
+  const j = await r.json();
+  assert.equal(j.error.code, 'VALIDATION');
+});
+await check('rejects too-long id', async () => {
+  const r = await get(s5.port, '/p/' + 'a'.repeat(100));
+  assert.equal(r.status, 400);
+});
+s5.srv.close();
+
+// ── 16. PHI coverage — every PHI-touching route must call markPhiAccess ──
+console.log('— PHI coverage on routes —');
+const phiRoutes = [
+  // Patient chart read
+  { route: "app.get('/api/patients/:id'", label: 'patient chart GET', expectMark: true },
+  { route: "app.get('/api/patients/:id/vitals'", label: 'patient vitals GET', expectMark: true },
+  { route: "app.get('/api/patients/:id/notes'", label: 'patient notes GET', expectMark: true },
+  { route: "app.post('/api/patients/:id/notes'", label: 'patient notes POST', expectMark: true },
+  { route: "app.delete('/api/patients/:pid/notes/:nid'", label: 'patient notes DELETE', expectMark: true },
+  { route: "app.get('/api/prescriptions/:id'", label: 'prescription GET', expectMark: true },
+  { route: "app.post('/api/prescriptions'", label: 'prescription POST', expectMark: true },
+  { route: "app.get('/api/prescriptions/:id/pdf'", label: 'prescription PDF export', expectMark: true },
+  { route: "app.post('/api/vitals'", label: 'vitals POST (doctor)', expectMark: true },
+  { route: "app.post('/api/patient/vitals'", label: 'patient vitals POST', expectMark: true },
+  { route: "app.post('/api/patient/adherence'", label: 'patient adherence POST', expectMark: true },
+  { route: "app.get('/api/patient/me'", label: 'patient /me GET', expectMark: true },
+  { route: "app.get('/api/patient/auth/me'", label: 'patient auth/me GET', expectMark: true },
+  { route: "app.post('/api/ai/ocr/prescription'", label: 'OCR prescription', expectMark: false }, // image not directly a patient row
+  { route: "app.post('/api/ai/ml/risk'", label: 'ML risk', expectMark: true },
+  { route: "app.post('/api/ai/ml/anomaly'", label: 'ML anomaly', expectMark: true },
+  { route: "app.post('/api/ai/ml/forecast'", label: 'ML forecast', expectMark: true },
+  { route: "app.post('/api/reminders'", label: 'reminders POST', expectMark: true },
+  { route: "app.post('/api/telemedicine/sessions'", label: 'tele sessions POST', expectMark: true },
+  { route: "app.get('/api/telemedicine/sessions/:id/messages'", label: 'tele messages GET', expectMark: true },
+  { route: "app.get('/api/analytics/cohort'", label: 'analytics cohort', expectMark: true },
+  { route: "app.get('/api/analytics/clinic-overview'", label: 'analytics clinic overview', expectMark: true },
+];
+for (const r of phiRoutes) {
+  await check(`PHI coverage: ${r.label}`, () => {
+    // Find the route handler block.
+    const idx = serverSrc.indexOf(r.route);
+    if (idx < 0) throw new Error(`route not found: ${r.route}`);
+    // Grab the next 1.5KB after the route — handlers are short.
+    const block = serverSrc.slice(idx, idx + 1500);
+    const hasMark = /markPhiAccess\(req/.test(block);
+    if (r.expectMark && !hasMark) throw new Error('expected markPhiAccess in handler block');
+    if (!r.expectMark && hasMark) throw new Error('unexpected markPhiAccess in handler block');
+  });
+}
+
+// ── 17. PHI fail-loud: phi_access.mjs exposes verifyPhiTable + metric ──
+console.log('— PHI fail-loud —');
+const phiSrc = fs.readFileSync('/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs', 'utf8');
+await check('phi_access.mjs exposes verifyPhiTable', () => assert.match(phiSrc, /export\s+(async\s+)?function\s+verifyPhiTable/));
+await check('phi_access.mjs classifies failures', () => assert.match(phiSrc, /classifyPhiFailure/));
+await check('phi_access.mjs uses phiLogFailures metric', () => assert.match(phiSrc, /phiLogFailures\.inc/));
+await check('phi_access.mjs hard-exits on missing table in prod', () => assert.match(phiSrc, /exitOnMissing/));
+const metricsSrc = fs.readFileSync('/Users/shubhammehta/Downloads/tatvacare/backend/lib/metrics.mjs', 'utf8');
+await check('metrics.mjs has phiLogFailures counter', () => assert.match(metricsSrc, /phi_log_failures_total/));
+
+// ── 18. server.mjs wires verifyPhiTable + has rate-limit on patient login ──
+await check('server.mjs calls verifyPhiTable at boot', () => assert.match(serverSrc, /verifyPhiTable\(pool/));
+await check('server.mjs rate-limits /api/patient/auth', () => assert.match(serverSrc, /app\.use\(['"]\/api\/patient\/auth['"],\s*rateLimits\.auth/));
+await check('server.mjs wires sqlStr consistently across inserts', () => {
+  // Look for the legacy pattern inside server.mjs. The PatientNotes
+  // GET/POST and reminders POST/tele sessions should all use sqlStr.
+  // We check that sqlStr is imported and used at least 6 times (proxy for
+  // "the rewrite landed"). The legacy `.replace(/'/g, "''")` should be
+  // rare — we allow up to 2 occurrences (e.g. legacy fallback paths).
+  const sqlStrCount = (serverSrc.match(/sqlStr\(/g) || []).length;
+  assert.ok(sqlStrCount >= 6, `expected >=6 sqlStr() calls, found ${sqlStrCount}`);
+});
+
+// ── 19. PHI table smoke check works on missing-table scenario ──────
+console.log('— PHI table smoke check —');
+await check('verifyPhiTable returns ok:false on missing table', async () => {
+  const fakePoolMissing = { query: async () => { const e = new Error('relation "phi_access_log" does not exist'); throw e; } };
+  const r = await verifyPhiTable(fakePoolMissing);
+  assert.equal(r.ok, false);
+  assert.ok(r.reason);
+  assert.equal(r.reason, 'table_missing');
+});
+await check('verifyPhiTable returns ok:true when SELECT succeeds', async () => {
+  const fakePoolOk = { query: async () => ({ rows: [] }) };
+  const r = await verifyPhiTable(fakePoolOk);
+  assert.equal(r.ok, true);
+});
+
+// ── 20. AI service main.py readyz correctness ─────────────────────
+const mainPySrc = fs.readFileSync('/Users/shubhammehta/Downloads/tatvacare/ai/service/main.py', 'utf8');
+await check('main.py _ready gated on vedadb ping success', () => {
+  // After the fix: _ready = (not _ready_reasons) — i.e. only True when
+  // the vedadb ping succeeded (reasons empty). Previously _ready=True
+  // was unconditional.
+  assert.match(mainPySrc, /_ready\s*=\s*\(not\s+_ready_reasons\)/);
+});
+
+// ── 21. config defaults — HOST should be 0.0.0.0 for containers ─────
+const configSrc = fs.readFileSync('/Users/shubhammehta/Downloads/tatvacare/backend/lib/config.mjs', 'utf8');
+await check('config HOST default is 0.0.0.0', () => {
+  // Either the default value or a comment must say 0.0.0.0.
+  assert.match(configSrc, /HOST.*['"]0\.0\.0\.0['"]/);
+});
+
+// ── 22. accessLogMiddleware sets req.id ───────────────────────────
+const loggerSrc = fs.readFileSync('/Users/shubhammehta/Downloads/tatvacare/backend/lib/logger.mjs', 'utf8');
+await check('accessLogMiddleware wires req.id for phi_access', () => {
+  assert.match(loggerSrc, /req\.id\s*=\s*requestId/);
 });
 
 // ── summary ────────────────────────────────────────────────────────

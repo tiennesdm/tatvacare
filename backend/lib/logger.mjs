@@ -117,6 +117,10 @@ export function accessLogMiddleware() {
       ? incoming
       : randomUUID();
     res.setHeader('x-request-id', requestId);
+    // Expose to downstream handlers — phi_access.mjs uses req.id for
+    // the request_id column on every PHI access row so an auditor can
+    // join "show me all PHI access during request <X>" with the access log.
+    req.id = requestId;
     const t0 = process.hrtime.bigint();
     // Run the rest of the request inside the ALS context so logger.* inside
     // any handler picks up the same request_id.

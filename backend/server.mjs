@@ -40,8 +40,9 @@ import { registry as metrics, renderMetrics, metricsMiddleware } from '/Users/sh
 import { aiBreaker, CircuitOpenError } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/circuit.mjs';
 import { buildServiceKeyHeader } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/ai_auth.mjs';
 import { ShutdownCoordinator } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/shutdown.mjs';
-import { phiAccessLogger, markPhiAccess } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs';
-import { validateBody, validateQuery, schemas } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/validate.mjs';
+import { phiAccessLogger, markPhiAccess, verifyPhiTable } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/phi_access.mjs';
+import { validateBody, validateQuery, validateParams, schemas, paramSchemas } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/validate.mjs';
+import { sqlStr, sqlInt, sqlNum, sqlBool, sqlValue, sqlIdent } from '/Users/shubhammehta/Downloads/tatvacare/backend/lib/sql.mjs';
 
 // ============ SECURITY MIDDLEWARE (E1 rate limit, E2 helmet, E4 sanitize) ============
 import {
@@ -92,6 +93,7 @@ const rateLimits = buildRateLimiters();
 // Vitals:  POST /api/vitals      → 60 req / min / IP  (writes only)
 // Default: everything else       → 120 req / min / IP
 app.use('/api/auth', rateLimits.auth);
+app.use('/api/patient/auth', rateLimits.auth);
 app.use('/api/ai', rateLimits.ai);
 // Default limiter covers everything else under /api/* that doesn't have
 // a stricter limiter. It also runs for /api/auth/* and /api/ai/* but
@@ -107,6 +109,21 @@ app.use('/api', rateLimits.default);
 app.use(metricsMiddleware());
 
 const pool = new VBPPool(config.VBP_HOST, config.VBP_PORT, config.VBP_POOL_MAX);
+
+// ============ BOOT: PHI compliance check ============
+// In production, refuse to start if the phi_access_log table is missing.
+// HIPAA §164.312(b) requires audit controls — a silent gap would be a
+// compliance failure. In dev, just log a warning so people can iterate
+// before migrations land.
+{
+  const strict = config.NODE_ENV === 'production';
+  verifyPhiTable(pool, { exitOnMissing: strict })
+    .then((r) => {
+      if (r.ok) logger.info('phi_table_ok', { table: 'phi_access_log' });
+      else if (!strict) logger.warn('phi_table_missing_dev', { reason: r.reason, hint: 'run backend/scripts/migrate.mjs' });
+    })
+    .catch((e) => logger.warn('phi_table_check_err', { err: e?.message }));
+}
 // Inject pool into metrics so /metrics can show vbp_pool_* gauges.
 globalThis.__tatvacare_metrics_deps = { pool };
 
@@ -294,15 +311,13 @@ app.get('/api/patients', requireAuth, async (req, res) => {
     jsonRes(res, { patients });
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/patients', requireAuthCsrf, async (req, res) => {
+app.post('/api/patients', requireAuthCsrf, validateBody(schemas.createPatient), async (req, res) => {
   try {
-    const { full_name, phone } = req.body;
-    if (!full_name || !phone) return errRes(res, 'full_name and phone are required');
     const p = await doc.createPatient(pool, req.body, req.session.doctor_id);
     jsonRes(res, { patient: p }, 201);
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.get('/api/patients/:id', requireAuth, async (req, res) => {
+app.get('/api/patients/:id', requireAuth, validateParams(paramSchemas.id), async (req, res) => {
   markPhiAccess(req, { action: 'read', resource_kind: 'patient', resource_id: req.params.id, patient_id: req.params.id });
   try { const p = await clinical.getPatientChart(pool, req.params.id); if (!p) return errRes(res, 'not found', 404); jsonRes(res, { patient: p }); }
   catch (e) { errRes(res, e.message, 500); }
@@ -327,21 +342,24 @@ app.get('/api/prescriptions', requireAuth, async (req, res) => {
   try { const rxs = await doc.listPrescriptions(pool, req.session.doctor_id, req.query.patient_id); jsonRes(res, { prescriptions: rxs }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.get('/api/prescriptions/:id', requireAuth, async (req, res) => {
+app.get('/api/prescriptions/:id', requireAuth, validateParams(paramSchemas.id), async (req, res) => {
+  // Mark PHI access BEFORE the ownership check so 403 attempts are also
+  // logged — a doctor trying to access another doctor's Rx is itself
+  // a PHI-touching event the auditor needs to see.
+  markPhiAccess(req, { action: 'read', resource_kind: 'prescription', resource_id: req.params.id, patient_id: '__pending__' });
   try {
     const rx = await doc.getPrescription(pool, req.params.id);
     if (!rx) return errRes(res, 'not found', 404);
+    // Re-mark with the real patient_id once we know it (overrides the
+    // pending placeholder above). Both attempts are logged.
+    req._phi.patient_id = rx.patient_id;
     if (rx.doctor_id !== req.session.doctor_id) return errRes(res, 'forbidden', 403);
-    markPhiAccess(req, { action: 'read', resource_kind: 'prescription', resource_id: req.params.id, patient_id: rx.patient_id });
     jsonRes(res, { prescription: rx });
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/prescriptions', requireAuthCsrf, async (req, res) => {
+app.post('/api/prescriptions', requireAuthCsrf, validateBody(schemas.createPrescription), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'prescription', patient_id: req.body.patient_id });
   try {
-    const { patient_id, rx_items, diagnosis_code } = req.body;
-    if (!patient_id) return errRes(res, 'patient_id is required');
-    if (!diagnosis_code) return errRes(res, 'diagnosis_code is required');
-    if (!Array.isArray(rx_items) || rx_items.length === 0) return errRes(res, 'rx_items must be non-empty array');
     const rx = await doc.createPrescription(pool, req.body, req.session.doctor_id);
     jsonRes(res, { prescription: rx }, 201);
   } catch (e) { errRes(res, e.message, 500); }
@@ -352,20 +370,20 @@ app.get('/api/drugs/search', requireAuth, async (req, res) => {
   try { const q = String(req.query.q || '').trim(); const drugs = await clinical.searchDrugs(pool, q); jsonRes(res, { drugs }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/drugs/check-interactions', requireAuthCsrf, async (req, res) => {
-  try { const drugs = req.body.drugs || []; const interactions = await clinical.checkInteractions(pool, drugs); jsonRes(res, { interactions }); }
+app.post('/api/drugs/check-interactions', requireAuthCsrf, validateBody(schemas.checkInteractions), async (req, res) => {
+  try { const interactions = await clinical.checkInteractions(pool, req.body.drugs); jsonRes(res, { interactions }); }
   catch (e) { errRes(res, e.message, 500); }
 });
 
 // ============ VITALS ============
-app.get('/api/patients/:id/vitals', requireAuth, async (req, res) => {
+app.get('/api/patients/:id/vitals', requireAuth, validateParams(paramSchemas.id), async (req, res) => {
   markPhiAccess(req, { action: 'read', resource_kind: 'patient_vitals_log', patient_id: req.params.id });
   try { const vitals = await clinical.listVitals(pool, req.params.id, req.query.type); jsonRes(res, { vitals }); }
   catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/vitals', rateLimits.vitalsWrite, requireAuthCsrf, async (req, res) => {
+app.post('/api/vitals', rateLimits.vitalsWrite, requireAuthCsrf, validateBody(schemas.doctorVitalsWrite), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'patient_vitals_log', patient_id: req.body.patient_id });
   try {
-    if (!req.body.patient_id) return errRes(res, 'patient_id required');
     const v = await clinical.createVital(pool, { ...req.body, recorded_by: req.session.doctor_id });
     jsonRes(res, { vital: v }, 201);
   } catch (e) { errRes(res, e.message, 500); }
@@ -423,10 +441,10 @@ app.get('/api/formulary/for-indication', requireAuth, (req, res) => {
 });
 
 // ============ PATIENT NOTES ============
-app.get('/api/patients/:id/notes', requireAuth, async (req, res) => {
+app.get('/api/patients/:id/notes', requireAuth, validateParams(paramSchemas.id), async (req, res) => {
   markPhiAccess(req, { action: 'read', resource_kind: 'patient_notes', patient_id: req.params.id });
   try {
-    const r = await pool.query(`SELECT note_id, patient_id, doctor_id, note_type, body, is_pinned, created_at, updated_at FROM patient_notes WHERE patient_id = ${doc.sqlStr ? doc.sqlStr(req.params.id) : `'${req.params.id.replace(/'/g, "''")}'`} ORDER BY is_pinned DESC, created_at DESC`);
+    const r = await pool.query(`SELECT note_id, patient_id, doctor_id, note_type, body, is_pinned, created_at, updated_at FROM patient_notes WHERE patient_id = ${sqlStr(req.params.id)} ORDER BY is_pinned DESC, created_at DESC`);
     const notes = (r.rows || []).map(row => ({
       note_id: row[0], patient_id: row[1], doctor_id: row[2],
       note_type: row[3] && row[3] !== 'NULL' ? row[3] : 'clinical',
@@ -438,20 +456,21 @@ app.get('/api/patients/:id/notes', requireAuth, async (req, res) => {
     jsonRes(res, { notes });
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.post('/api/patients/:id/notes', requireAuthCsrf, async (req, res) => {
+app.post('/api/patients/:id/notes', requireAuthCsrf, validateParams(paramSchemas.id), validateBody(schemas.createNote), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'patient_notes', patient_id: req.params.id });
   try {
     const { note_type, body, is_pinned } = req.body;
-    if (!body) return errRes(res, 'body required');
     const note_id = 'n-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const q = `INSERT INTO patient_notes (note_id, patient_id, doctor_id, note_type, body, is_pinned, created_at, updated_at) VALUES ('${note_id}', '${req.params.id.replace(/'/g, "''")}', '${req.session.doctor_id}', '${(note_type || 'clinical').replace(/'/g, "''")}', ${doc.sqlStr ? doc.sqlStr(body) : `'${body.replace(/'/g, "''")}'`}, '${is_pinned ? '1' : '0'}', '${now}', '${now}')`;
+    const q = `INSERT INTO patient_notes (note_id, patient_id, doctor_id, note_type, body, is_pinned, created_at, updated_at) VALUES (${sqlStr(note_id)}, ${sqlStr(req.params.id)}, ${sqlStr(req.session.doctor_id)}, ${sqlStr(note_type || 'clinical')}, ${sqlStr(body)}, ${sqlBool(is_pinned)}, ${sqlStr(now)}, ${sqlStr(now)})`;
     await pool.query(q);
     jsonRes(res, { note: { note_id, patient_id: req.params.id, doctor_id: req.session.doctor_id, note_type: note_type || 'clinical', body, is_pinned: !!is_pinned, created_at: now, updated_at: now } }, 201);
   } catch (e) { errRes(res, e.message, 500); }
 });
-app.delete('/api/patients/:pid/notes/:nid', requireAuthCsrf, async (req, res) => {
+app.delete('/api/patients/:pid/notes/:nid', requireAuthCsrf, validateParams({ pid: paramSchemas.pid.pid, nid: paramSchemas.nid.nid }), async (req, res) => {
+  markPhiAccess(req, { action: 'delete', resource_kind: 'patient_notes', resource_id: req.params.nid, patient_id: req.params.pid });
   try {
-    await pool.query(`DELETE FROM patient_notes WHERE note_id = '${req.params.nid.replace(/'/g, "''")}' AND doctor_id = '${req.session.doctor_id}'`);
+    await pool.query(`DELETE FROM patient_notes WHERE note_id = ${sqlStr(req.params.nid)} AND doctor_id = ${sqlStr(req.session.doctor_id)}`);
     jsonRes(res, { ok: true });
   } catch (e) { errRes(res, e.message, 500); }
 });
@@ -588,20 +607,18 @@ async function aiFetch(aiPath, init = {}) {
 }
 
 // OCR
-app.post('/api/ai/ocr/prescription', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/ocr/prescription', requireAuthCsrf, validateBody(schemas.ocrImage), async (req, res) => {
   try {
-    const { image } = req.body; // base64 data URL or raw base64
-    if (!image) return errRes(res, 'image required');
+    const { image } = req.body;
     const b64 = image.replace(/^data:image\/\w+;base64,/, '');
     const r = await aiFetch('/ocr/prescription', { method: 'POST', body: JSON.stringify({ image: b64 }) });
     jsonRes(res, await r.json());
   } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-app.post('/api/ai/ocr/lab-report', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/ocr/lab-report', requireAuthCsrf, validateBody(schemas.ocrImage), async (req, res) => {
   try {
     const { image } = req.body;
-    if (!image) return errRes(res, 'image required');
     const b64 = image.replace(/^data:image\/\w+;base64,/, '');
     const r = await aiFetch('/ocr/lab-report', { method: 'POST', body: JSON.stringify({ image: b64 }) });
     jsonRes(res, await r.json());
@@ -609,7 +626,7 @@ app.post('/api/ai/ocr/lab-report', requireAuthCsrf, async (req, res) => {
 });
 
 // NLP — extract entities / suggest ICD-10
-app.post('/api/ai/nlp/entities', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/nlp/entities', requireAuthCsrf, validateBody(schemas.nlpText), async (req, res) => {
   try {
     const { text } = req.body;
     const r = await aiFetch('/nlp/extract-entities', { method: 'POST', body: JSON.stringify({ text: text || '' }) });
@@ -617,7 +634,7 @@ app.post('/api/ai/nlp/entities', requireAuthCsrf, async (req, res) => {
   } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-app.post('/api/ai/nlp/icd10', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/nlp/icd10', requireAuthCsrf, validateBody(schemas.nlpText), async (req, res) => {
   try {
     const { text, top_k } = req.body;
     const r = await aiFetch('/nlp/suggest-icd10', { method: 'POST', body: JSON.stringify({ text: text || '', top_k: top_k || 5 }) });
@@ -638,14 +655,16 @@ app.post('/api/ai/voice/transcribe', requireAuthCsrf, async (req, res) => {
 });
 
 // ML — risk / anomaly / forecast
-app.post('/api/ai/ml/risk', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/ml/risk', requireAuthCsrf, validateBody(schemas.mlPatientOp), async (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'ml_risk', patient_id: req.body.patient_id });
   try {
     const r = await aiFetch('/ml/risk', { method: 'POST', body: JSON.stringify({ patient_id: req.body.patient_id }) });
     jsonRes(res, await r.json());
   } catch (e) { errRes(res, 'AI service error: ' + (e.message || 'unknown'), e.status || 502, e.code || 'AI_ERROR'); }
 });
 
-app.post('/api/ai/ml/anomaly', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/ml/anomaly', requireAuthCsrf, validateBody(schemas.mlPatientOp), async (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'ml_anomaly', patient_id: req.body.patient_id });
   try {
     const r = await aiFetch('/ml/anomaly', { method: 'POST', body: JSON.stringify({ patient_id: req.body.patient_id, metric: req.body.metric || 'systolic' }) });
     jsonRes(res, await r.json());
@@ -791,6 +810,7 @@ app.post('/api/patient/auth/logout', requirePatientAuthCsrf, async (req, res) =>
 });
 
 app.get('/api/patient/auth/me', requirePatientAuth, (req, res) => {
+  markPhiAccess(req, { action: 'read', resource_kind: 'patient', resource_id: req.patientSession.patient.patient_id, patient_id: req.patientSession.patient.patient_id });
   jsonRes(res, { patient: req.patientSession.patient });
 });
 
@@ -824,6 +844,7 @@ app.get('/api/patient/me', requirePatientAuth, async (req, res) => {
 });
 
 app.post('/api/patient/vitals', requirePatientAuthCsrf, validateBody(schemas.patientVitals), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'patient_vitals_log', resource_id: null, patient_id: req.patientSession.patient.patient_id });
   const pid = req.patientSession.patient.patient_id;
   const { metric, value, unit, notes } = req.body || {};
   if (!metric || value === undefined) return errRes(res, 'metric + value required');
@@ -865,6 +886,7 @@ const ADHERENCE_STATUS = new Set(['taken', 'missed', 'skipped']);
 const ADHERENCE_SLOTS = new Set(['morning', 'afternoon', 'evening', 'night', 'custom']);
 
 app.post('/api/patient/adherence', requirePatientAuthCsrf, validateBody(schemas.patientAdherence), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'med_adherence', resource_id: null, patient_id: req.patientSession.patient.patient_id });
   const pid = req.patientSession.patient.patient_id;
   const {
     drug_name, dose, schedule_slot, scheduled_at,
@@ -1046,8 +1068,12 @@ app.get('/api/reminders', requireAuth, async (req, res) => {
   const { patient_id, status } = req.query;
   let q = `SELECT reminder_id, patient_id, kind, title, body, schedule_type, schedule_at, channel, status, source_kind, source_id, created_at
            FROM reminders WHERE 1=1`;
-  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
-  if (status) q += ` AND status = '${status}'`;
+  if (patient_id) {
+    if (!/^[a-zA-Z0-9_:-]{1,64}$/.test(String(patient_id))) return errRes(res, 'invalid patient_id', 400, 'BAD_REQUEST');
+    q += ` AND patient_id = ${sqlStr(String(patient_id))}`;
+    markPhiAccess(req, { action: 'read', resource_kind: 'reminder', patient_id: String(patient_id) });
+  }
+  if (status) q += ` AND status = ${sqlStr(String(status))}`;
   q += ' ORDER BY schedule_at ASC LIMIT 200';
   const rows = await pool.query(q);
   jsonRes(res, { reminders: rows.rows.map(r => ({
@@ -1057,16 +1083,16 @@ app.get('/api/reminders', requireAuth, async (req, res) => {
   })) });
 });
 
-app.post('/api/reminders', requireAuthCsrf, async (req, res) => {
-  const { patient_id, kind, title, body, schedule_type, schedule_at, channel } = req.body || {};
-  if (!patient_id || !kind || !title || !schedule_type) return errRes(res, 'patient_id, kind, title, schedule_type required');
+app.post('/api/reminders', requireAuthCsrf, validateBody(schemas.createReminder), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'reminder', patient_id: req.body.patient_id });
+  const { patient_id, kind, title, body, schedule_type, schedule_at, channel } = req.body;
   const reminder_id = 'r-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const schedule_at_str = (schedule_at || ts).slice(0, 19).replace('T', ' ');
   try {
     await pool.query(
       `INSERT INTO reminders (reminder_id, patient_id, kind, title, body, schedule_type, schedule_at, channel, source_kind, source_id, created_at, created_by)
-       VALUES ('${reminder_id}', '${patient_id.replace(/'/g, "''")}', '${kind.replace(/'/g, "''")}', '${title.replace(/'/g, "''")}', '${(body || '').replace(/'/g, "''")}', '${schedule_type.replace(/'/g, "''")}', '${schedule_at_str}', '${(channel || 'whatsapp').replace(/'/g, "''")}', 'manual', '', '${ts}', '${req.session.doctor_id}')`
+       VALUES (${sqlStr(reminder_id)}, ${sqlStr(patient_id)}, ${sqlStr(kind)}, ${sqlStr(title)}, ${sqlStr(body || '')}, ${sqlStr(schedule_type)}, ${sqlStr(schedule_at_str)}, ${sqlStr(channel || 'whatsapp')}, 'manual', '', ${sqlStr(ts)}, ${sqlStr(req.session.doctor_id)})`
     );
     await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'create', resource_kind: 'reminder', resource_id: reminder_id, diff_json: { patient_id, kind, title } });
     jsonRes(res, { reminder_id }, 201);
@@ -1076,8 +1102,12 @@ app.post('/api/reminders', requireAuthCsrf, async (req, res) => {
 app.get('/api/reminders/deliveries', requireAuth, async (req, res) => {
   const { reminder_id, patient_id } = req.query;
   let q = `SELECT delivery_id, reminder_id, patient_id, ts, channel, status, provider_msg_id, error FROM reminder_deliveries WHERE 1=1`;
-  if (reminder_id) q += ` AND reminder_id = '${reminder_id.replace(/'/g, "''")}'`;
-  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
+  if (reminder_id) q += ` AND reminder_id = ${sqlStr(String(reminder_id))}`;
+  if (patient_id) {
+    if (!/^[a-zA-Z0-9_:-]{1,64}$/.test(String(patient_id))) return errRes(res, 'invalid patient_id', 400, 'BAD_REQUEST');
+    q += ` AND patient_id = ${sqlStr(String(patient_id))}`;
+    markPhiAccess(req, { action: 'read', resource_kind: 'reminder_delivery', patient_id: String(patient_id) });
+  }
   q += ' ORDER BY ts DESC LIMIT 100';
   const rows = await pool.query(q);
   jsonRes(res, { deliveries: rows.rows.map(r => ({
@@ -1096,8 +1126,12 @@ app.get('/api/telemedicine/sessions', requireAuth, async (req, res) => {
   const { patient_id, doctor_id } = req.query;
   let q = `SELECT session_id, patient_id, doctor_id, scheduled_at, started_at, ended_at, status, channel, notes, followup_rx_id, created_at
            FROM tele_sessions WHERE 1=1`;
-  if (patient_id) q += ` AND patient_id = '${patient_id.replace(/'/g, "''")}'`;
-  if (doctor_id) q += ` AND doctor_id = '${doctor_id.replace(/'/g, "''")}'`;
+  if (patient_id) {
+    if (!/^[a-zA-Z0-9_:-]{1,64}$/.test(String(patient_id))) return errRes(res, 'invalid patient_id', 400, 'BAD_REQUEST');
+    q += ` AND patient_id = ${sqlStr(String(patient_id))}`;
+    markPhiAccess(req, { action: 'read', resource_kind: 'tele_session', patient_id: String(patient_id) });
+  }
+  if (doctor_id) q += ` AND doctor_id = ${sqlStr(String(doctor_id))}`;
   q += ' ORDER BY scheduled_at DESC LIMIT 50';
   const rows = await pool.query(q);
   jsonRes(res, { sessions: rows.rows.map(r => ({
@@ -1107,55 +1141,57 @@ app.get('/api/telemedicine/sessions', requireAuth, async (req, res) => {
   })) });
 });
 
-app.post('/api/telemedicine/sessions', requireAuthCsrf, async (req, res) => {
-  const { patient_id, scheduled_at, channel } = req.body || {};
-  if (!patient_id || !scheduled_at) return errRes(res, 'patient_id and scheduled_at required');
+app.post('/api/telemedicine/sessions', requireAuthCsrf, validateBody(schemas.createTeleSession), async (req, res) => {
+  markPhiAccess(req, { action: 'create', resource_kind: 'tele_session', patient_id: req.body.patient_id });
+  const { patient_id, scheduled_at, channel } = req.body;
   const session_id = 'tele-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
   try {
     await pool.query(
       `INSERT INTO tele_sessions (session_id, patient_id, doctor_id, scheduled_at, status, channel, created_at)
-       VALUES ('${session_id}', '${patient_id.replace(/'/g, "''")}', '${req.session.doctor_id}', '${scheduled_at.replace(/'/g, "''")}', 'scheduled', '${(channel || 'webrtc').replace(/'/g, "''")}', '${ts}')`
+       VALUES (${sqlStr(session_id)}, ${sqlStr(patient_id)}, ${sqlStr(req.session.doctor_id)}, ${sqlStr(scheduled_at)}, 'scheduled', ${sqlStr(channel || 'webrtc')}, ${sqlStr(ts)})`
     );
     await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'create', resource_kind: 'tele_session', resource_id: session_id, diff_json: { patient_id, scheduled_at } });
     jsonRes(res, { session_id }, 201);
   } catch (e) { errRes(res, e.message, 500); }
 });
 
-app.post('/api/telemedicine/sessions/:id/start', requireAuthCsrf, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/start', requireAuthCsrf, validateParams(paramSchemas.id), async (req, res) => {
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  await pool.query(`UPDATE tele_sessions SET status = 'active', started_at = '${ts}' WHERE session_id = '${req.params.id.replace(/'/g, "''")}'`);
+  await pool.query(`UPDATE tele_sessions SET status = 'active', started_at = ${sqlStr(ts)} WHERE session_id = ${sqlStr(req.params.id)}`);
   await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'start', resource_kind: 'tele_session', resource_id: req.params.id });
   jsonRes(res, { ok: true });
 });
 
-app.post('/api/telemedicine/sessions/:id/end', requireAuthCsrf, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/end', requireAuthCsrf, validateParams(paramSchemas.id), validateBody(schemas.endTeleSession), async (req, res) => {
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const { notes, followup_rx_id } = req.body || {};
+  const { notes, followup_rx_id } = req.body;
   await pool.query(
-    `UPDATE tele_sessions SET status = 'completed', ended_at = '${ts}', notes = '${(notes || '').replace(/'/g, "''")}', followup_rx_id = '${(followup_rx_id || '').replace(/'/g, "''")}' WHERE session_id = '${req.params.id.replace(/'/g, "''")}'`
+    `UPDATE tele_sessions SET status = 'completed', ended_at = ${sqlStr(ts)}, notes = ${sqlStr(notes || '')}, followup_rx_id = ${sqlStr(followup_rx_id || '')} WHERE session_id = ${sqlStr(req.params.id)}`
   );
   await audit(pool, req, { actor_kind: 'doctor', actor_id: req.session.doctor_id, action: 'end', resource_kind: 'tele_session', resource_id: req.params.id, diff_json: { notes, followup_rx_id } });
   jsonRes(res, { ok: true });
 });
 
-app.get('/api/telemedicine/sessions/:id/messages', requireAuth, async (req, res) => {
+app.get('/api/telemedicine/sessions/:id/messages', requireAuth, validateParams(paramSchemas.id), async (req, res) => {
   const rows = await pool.query(
-    `SELECT message_id, session_id, ts, sender_kind, sender_id, body FROM tele_messages WHERE session_id = '${req.params.id.replace(/'/g, "''")}' ORDER BY ts ASC`
+    `SELECT message_id, session_id, ts, sender_kind, sender_id, body FROM tele_messages WHERE session_id = ${sqlStr(req.params.id)} ORDER BY ts ASC`
   );
+  markPhiAccess(req, { action: 'read', resource_kind: 'tele_message', resource_id: req.params.id, patient_id: '__pending__' });
   jsonRes(res, { messages: rows.rows.map(r => ({
     message_id: r[0], session_id: r[1], ts: r[2], sender_kind: r[3], sender_id: r[4], body: r[5],
   })) });
 });
 
-app.post('/api/telemedicine/sessions/:id/messages', requireAuthCsrf, async (req, res) => {
+app.post('/api/telemedicine/sessions/:id/messages', requireAuthCsrf, validateParams(paramSchemas.id), async (req, res) => {
   const { body } = req.body || {};
-  if (!body) return errRes(res, 'body required');
+  if (!body || typeof body !== 'string') return errRes(res, 'body (string) required', 400, 'BAD_REQUEST');
+  if (body.length > 4000) return errRes(res, 'body too long (max 4000)', 400, 'BAD_REQUEST');
   const message_id = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
   await pool.query(
     `INSERT INTO tele_messages (message_id, session_id, ts, sender_kind, sender_id, body)
-     VALUES ('${message_id}', '${req.params.id.replace(/'/g, "''")}', '${ts}', 'doctor', '${req.session.doctor_id}', '${body.replace(/'/g, "''")}')`
+     VALUES (${sqlStr(message_id)}, ${sqlStr(req.params.id)}, ${sqlStr(ts)}, 'doctor', ${sqlStr(req.session.doctor_id)}, ${sqlStr(body)})`
   );
   jsonRes(res, { message_id }, 201);
 });
@@ -1164,6 +1200,19 @@ app.post('/api/telemedicine/sessions/:id/messages', requireAuthCsrf, async (req,
 app.get('/api/analytics/cohort', requireAuth, async (req, res) => {
   // Cohort finder — find patients matching criteria
   const { condition, min_age, max_age, hba1c_above, on_medication } = req.query;
+  // Numeric inputs from query string — parseInt with explicit radix and
+  // NaN guard so we never feed undefined into the age comparator.
+  const minAgeN = min_age != null && min_age !== '' ? Number(min_age) : null;
+  const maxAgeN = max_age != null && max_age !== '' ? Number(max_age) : null;
+  const hba1cN   = hba1c_above != null && hba1c_above !== '' ? Number(hba1c_above) : null;
+  if ([minAgeN, maxAgeN, hba1cN].some((n) => n !== null && !Number.isFinite(n))) {
+    return errRes(res, 'min_age/max_age/hba1c_above must be numeric', 400, 'BAD_REQUEST');
+  }
+  // Mark a cohort-finder access — even though this returns a filtered
+  // subset, the query itself is a PHI-touching operation across many
+  // patients. We attach a single summary row marked action='export' so
+  // auditors can see "doctor X ran a cohort at time Y".
+  markPhiAccess(req, { action: 'export', resource_kind: 'patient_cohort', patient_id: '__cohort__' });
   const allRows = await pool.query(`SELECT patient_id, full_name, gender, dob, phone FROM patients WHERE is_active = 1 LIMIT 500`);
   const patients = allRows.rows.map(r => ({
     patient_id: r[0], full_name: r[1], gender: r[2], dob: r[3], phone: r[4],
@@ -1171,7 +1220,8 @@ app.get('/api/analytics/cohort', requireAuth, async (req, res) => {
   }));
   const matches = [];
   for (const p of patients) {
-    if (min_age && (p.age_years || 0) < parseInt(min_age)) continue;
+    if (minAgeN !== null && (p.age_years || 0) < minAgeN) continue;
+    if (maxAgeN !== null && (p.age_years || 0) > maxAgeN) continue;
     if (max_age && (p.age_years || 0) > parseInt(max_age)) continue;
     const problems = await clinical.getPatientProblems(pool, p.patient_id);
     const allProblems = problems.map(r => (r[0] || '').toLowerCase()).join(' ');
@@ -1181,10 +1231,10 @@ app.get('/api/analytics/cohort', requireAuth, async (req, res) => {
       const drugList = meds.map(r => (r[1] || '').toLowerCase()).join(' ');
       if (!drugList.includes(on_medication.toLowerCase())) continue;
     }
-    if (hba1c_above) {
+    if (hba1cN !== null) {
       const vitals = await clinical.getPatientVitals(pool, p.patient_id);
       const hba1c = vitals.find(v => v[2] && v[2].toLowerCase().includes('hba1c'));
-      if (!hba1c || !hba1c[3] || parseFloat(hba1c[3]) < parseFloat(hba1c_above)) continue;
+      if (!hba1c || !hba1c[3] || parseFloat(hba1c[3]) < hba1cN) continue;
     }
     matches.push({
       patient_id: p.patient_id,
@@ -1199,6 +1249,7 @@ app.get('/api/analytics/cohort', requireAuth, async (req, res) => {
 });
 
 app.get('/api/analytics/clinic-overview', requireAuth, async (req, res) => {
+  markPhiAccess(req, { action: 'export', resource_kind: 'patient_overview', patient_id: '__clinic__' });
   const allRows = await pool.query(`SELECT patient_id, full_name, dob FROM patients WHERE is_active = 1`);
   const allRx = (await clinical.listAllPrescriptions(pool, { limit: 1000 })).prescriptions || [];
   const allVitals = await clinical.getAllVitals(pool);
@@ -1241,11 +1292,13 @@ app.get('/api/analytics/clinic-overview', requireAuth, async (req, res) => {
 // ============ AUDIT LOG ============
 app.get('/api/audit', requireAuth, async (req, res) => {
   const { resource_kind, resource_id, actor_id, limit } = req.query;
+  const limitN = parseInt(String(limit ?? ''), 10);
+  const safeLimit = Number.isInteger(limitN) && limitN > 0 && limitN <= 1000 ? limitN : 100;
   let q = `SELECT audit_id, ts, actor_kind, actor_id, action, resource_kind, resource_id, ip, diff_json FROM audit_log WHERE 1=1`;
-  if (resource_kind) q += ` AND resource_kind = '${resource_kind.replace(/'/g, "''")}'`;
-  if (resource_id) q += ` AND resource_id = '${resource_id.replace(/'/g, "''")}'`;
-  if (actor_id) q += ` AND actor_id = '${actor_id.replace(/'/g, "''")}'`;
-  q += ` ORDER BY ts DESC LIMIT ${parseInt(limit) || 100}`;
+  if (resource_kind) q += ` AND resource_kind = ${sqlStr(String(resource_kind))}`;
+  if (resource_id) q += ` AND resource_id = ${sqlStr(String(resource_id))}`;
+  if (actor_id) q += ` AND actor_id = ${sqlStr(String(actor_id))}`;
+  q += ` ORDER BY ts DESC LIMIT ${safeLimit}`;
   const rows = await pool.query(q);
   jsonRes(res, { entries: rows.rows.map(r => ({
     audit_id: r[0], ts: r[1], actor_kind: r[2], actor_id: r[3], action: r[4],
@@ -1254,9 +1307,8 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 });
 
 // ============ RAG (clinical guidelines) ============
-app.post('/api/rag/query', requireAuthCsrf, async (req, res) => {
-  const { query } = req.body || {};
-  if (!query) return errRes(res, 'query required');
+app.post('/api/rag/query', requireAuthCsrf, validateBody(schemas.ragQuery), async (req, res) => {
+  const { query } = req.body;
   try {
     const { context, citations } = await augmentPrompt(pool, query, 3);
     if (!llmEnabled()) {
@@ -1318,10 +1370,9 @@ async function aiAgent(name, ctx, req) {
   try { return JSON.parse(r.text); } catch { return null; }
 }
 
-app.post('/api/ai/agents/llm', requireAuthCsrf, async (req, res) => {
+app.post('/api/ai/agents/llm', requireAuthCsrf, validateBody(schemas.agentLlm), async (req, res) => {
   // LLM-powered version of the existing agents — proxy to Python with LLM augmentation
-  const { agent, ...body } = req.body || {};
-  if (!agent) return errRes(res, 'agent required');
+  const { agent, ...body } = req.body;
   // First get the rule-based result from Python (via the shared aiFetch so
   // it gets the timeout + breaker + service-key treatment).
   try {
