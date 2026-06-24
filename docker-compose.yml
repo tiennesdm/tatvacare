@@ -37,6 +37,35 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # ── MIGRATION RUNNER ─────────────────────────────────────────────
+  # Runs db/migrations/*.sql against edadb on first start. The backend
+  # depends_on this service (service_completed_successfully) so it never
+  # boots against an unmigrated database. The runner is one-shot: exits 0
+  # when migrations are applied; the `restart: on-failure` policy re-runs
+  # only if a previous run actually failed (network blip, race, etc.).
+  #
+  # Why a separate service (not a backend startup hook):
+  #   - The backend image doesn't ship migration code paths that touch the
+  #     schema; we want schema control in ONE place (migrate.mjs).
+  #   - If migrate fails, backend stays down — clearer signal than silent
+  #     half-broken startup with missing tables.
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: tatvacare-backend:latest
+    container_name: tatvacare-migrate
+    depends_on:
+      edadb:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      VBP_HOST: edadb
+      VBP_PORT: "6381"
+    entrypoint: ["/sbin/tini", "--"]
+    command: ["node", "scripts/migrate.mjs"]
+    restart: on-failure
+
   backend:
     build:
       context: .
@@ -46,6 +75,8 @@ services:
     depends_on:
       edadb:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ai:
         condition: service_started
     ports:

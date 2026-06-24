@@ -117,6 +117,51 @@ export function validateBody(schema) {
 }
 
 /**
+ * Validate URL params against a schema (all values come in as strings).
+ * Drops unknown params (strict mode). Writes the cleaned values into
+ * req.params so downstream code can use them without re-parsing.
+ *
+ * Usage:
+ *   app.get('/api/patients/:id',
+ *     requireAuth,
+ *     validateParams({ id: { type: 'string', minLen: 1, maxLen: 64, pattern: '^[a-zA-Z0-9_-]+$' } }),
+ *     handler);
+ */
+export function validateParams(schema) {
+  if (!schema || typeof schema !== 'object') {
+    throw new Error('validateParams: schema must be an object');
+  }
+  const allowedKeys = new Set(Object.keys(schema));
+  return (req, res, next) => {
+    const p = req.params || {};
+    const cleaned = {};
+    for (const [key, spec] of Object.entries(schema)) {
+      const raw = p[key];
+      if (raw === undefined) {
+        if (spec.optional) continue;
+        return fail(res, `missing required path param`, key);
+      }
+      let v = raw;
+      // Coerce URL strings (they're always strings from Express) per schema.
+      if (spec.type === 'integer') v = parseInt(raw, 10);
+      else if (spec.type === 'number') v = Number(raw);
+      else if (spec.type === 'boolean') v = /^(1|true|yes)$/i.test(String(raw));
+      const err = checkType(v, spec, key);
+      if (err) return fail(res, err, key);
+      cleaned[key] = v;
+    }
+    // Reject unknown params in strict mode (prevents `?evil=...` smuggling).
+    for (const k of Object.keys(p)) {
+      if (!allowedKeys.has(k)) {
+        return fail(res, `unknown path param`, k);
+      }
+    }
+    req.params = cleaned;
+    next();
+  };
+}
+
+/**
  * Validate query params against a schema (all values come in as strings).
  */
 export function validateQuery(schema) {
@@ -203,4 +248,142 @@ export const schemas = {
       horizon_days: { type: 'integer', min: 1, max: 30, optional: true },
     },
   },
+  // POST /api/patients — create new patient
+  createPatient: {
+    required: ['full_name', 'phone'],
+    props: {
+      full_name: { type: 'string', minLen: 1, maxLen: 200 },
+      phone: { type: 'string', pattern: '^[+0-9 ()-]{6,20}$' },
+      email: { type: 'string', pattern: '^[^@]+@[^@]+\\.[^@]+$', optional: true },
+      dob: { type: 'string', maxLen: 32, optional: true },
+      gender: { type: 'string', enum: ['M', 'F', 'O', 'U'], optional: true },
+      age: { type: 'integer', min: 0, max: 130, optional: true },
+      address: { type: 'string', maxLen: 500, optional: true },
+    },
+  },
+  // POST /api/prescriptions — write new prescription
+  createPrescription: {
+    required: ['patient_id', 'diagnosis_code', 'rx_items'],
+    props: {
+      patient_id: { type: 'string', minLen: 1, maxLen: 64 },
+      diagnosis_code: { type: 'string', minLen: 1, maxLen: 32 },
+      diagnosis_label: { type: 'string', maxLen: 300, optional: true },
+      rx_items: { type: 'array', minLen: 1, maxLen: 50, items: { type: 'object' } },
+      notes: { type: 'string', maxLen: 4000, optional: true },
+      followup_in_days: { type: 'integer', min: 0, max: 365, optional: true },
+      advice: { type: 'string', maxLen: 2000, optional: true },
+    },
+  },
+  // POST /api/vitals — doctor-side vitals write
+  doctorVitalsWrite: {
+    required: ['patient_id', 'metric', 'value'],
+    props: {
+      patient_id: { type: 'string', minLen: 1, maxLen: 64 },
+      metric: { type: 'string', enum: ['systolic', 'diastolic', 'glucose', 'glucose_fasting', 'glucose_pp', 'weight', 'heart_rate', 'spo2', 'temperature', 'steps'] },
+      value: { type: 'number' },
+      unit: { type: 'string', maxLen: 16, optional: true },
+      recorded_at: { type: 'string', maxLen: 32, optional: true },
+      notes: { type: 'string', maxLen: 500, optional: true },
+    },
+  },
+  // POST /api/patients/:id/notes — clinical note
+  createNote: {
+    required: ['body'],
+    props: {
+      note_type: { type: 'string', enum: ['clinical', 'soap', 'followup', 'referral'], optional: true },
+      body: { type: 'string', minLen: 1, maxLen: 4000 },
+      is_pinned: { type: 'boolean', optional: true },
+    },
+  },
+  // POST /api/reminders — create reminder
+  createReminder: {
+    required: ['patient_id', 'kind', 'title', 'schedule_type'],
+    props: {
+      patient_id: { type: 'string', minLen: 1, maxLen: 64 },
+      kind: { type: 'string', enum: ['medication', 'appointment', 'lab', 'vitals', 'custom'] },
+      title: { type: 'string', minLen: 1, maxLen: 200 },
+      body: { type: 'string', maxLen: 1000, optional: true },
+      schedule_type: { type: 'string', enum: ['once', 'daily', 'weekly', 'monthly'] },
+      schedule_at: { type: 'string', maxLen: 32, optional: true },
+      channel: { type: 'string', enum: ['whatsapp', 'sms', 'push', 'email'], optional: true },
+    },
+  },
+  // POST /api/telemedicine/sessions
+  createTeleSession: {
+    required: ['patient_id', 'scheduled_at'],
+    props: {
+      patient_id: { type: 'string', minLen: 1, maxLen: 64 },
+      scheduled_at: { type: 'string', minLen: 1, maxLen: 32 },
+      channel: { type: 'string', enum: ['webrtc', 'phone', 'video'], optional: true },
+    },
+  },
+  // POST /api/telemedicine/sessions/:id/end
+  endTeleSession: {
+    props: {
+      notes: { type: 'string', maxLen: 4000, optional: true },
+      followup_rx_id: { type: 'string', maxLen: 64, optional: true },
+    },
+  },
+  // POST /api/ai/ocr/* — image payload validation
+  ocrImage: {
+    required: ['image'],
+    props: {
+      image: { type: 'string', minLen: 32, maxLen: 8_000_000 }, // base64 ~6MB image
+    },
+  },
+  // POST /api/ai/nlp/entities, /api/ai/nlp/icd10
+  nlpText: {
+    required: ['text'],
+    props: {
+      text: { type: 'string', minLen: 1, maxLen: 20_000 },
+      top_k: { type: 'integer', min: 1, max: 50, optional: true },
+    },
+  },
+  // POST /api/ai/ml/risk, /api/ai/ml/anomaly
+  mlPatientOp: {
+    required: ['patient_id'],
+    props: {
+      patient_id: { type: 'string', minLen: 1, maxLen: 64 },
+      metric: { type: 'string', enum: ['systolic', 'diastolic', 'glucose', 'weight', 'heart_rate', 'spo2'], optional: true },
+    },
+  },
+  // POST /api/ai/agents/llm
+  agentLlm: {
+    required: ['agent'],
+    props: {
+      agent: { type: 'string', enum: ['soap', 'coding', 'lab_triage', 'drug_ix', 'followup'] },
+      transcript: { type: 'string', maxLen: 20_000, optional: true },
+      patient_id: { type: 'string', maxLen: 64, optional: true },
+      test_name: { type: 'string', maxLen: 200, optional: true },
+      value: { type: 'string', maxLen: 200, optional: true },
+      unit: { type: 'string', maxLen: 50, optional: true },
+      interactions: { type: 'array', optional: true, items: { type: 'object' } },
+      allergy_alerts: { type: 'array', optional: true, items: { type: 'object' } },
+    },
+  },
+  // POST /api/rag/query
+  ragQuery: {
+    required: ['query'],
+    props: {
+      query: { type: 'string', minLen: 3, maxLen: 2000 },
+    },
+  },
+  // POST /api/drugs/check-interactions
+  checkInteractions: {
+    required: ['drugs'],
+    props: {
+      drugs: { type: 'array', minLen: 2, maxLen: 30, items: { type: 'string' } },
+    },
+  },
+  // POST /api/tasks/:id/complete, /api/tasks/:id/dismiss — body is empty,
+  // but the path params need validation. Schema lives in `paramSchemas`.
+};
+
+// ============ Param schemas (for URL :id style) ============
+export const paramSchemas = {
+  // Generic IDs — alphanumeric + dash + underscore, length-capped.
+  id: { id: { type: 'string', minLen: 1, maxLen: 64, pattern: '^[a-zA-Z0-9_:-]+$' } },
+  pid: { pid: { type: 'string', minLen: 1, maxLen: 64, pattern: '^[a-zA-Z0-9_:-]+$' } },
+  nid: { nid: { type: 'string', minLen: 1, maxLen: 64, pattern: '^[a-zA-Z0-9_-]+$' } },
+  drugName: { drugName: { type: 'string', minLen: 1, maxLen: 200, pattern: '^[a-zA-Z0-9 _()/-]+$' } },
 };

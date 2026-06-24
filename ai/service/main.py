@@ -106,8 +106,12 @@ async def lifespan(_app: FastAPI):
         print(f"[startup] vedadb FAIL: {e}", file=sys.stderr, flush=True)
     # Note: do NOT preload XGBoost here — it conflicts with PyTorch in the same
     # process. Run ai/preload.sh before starting uvicorn to pre-train all models.
-    _ready = True
-    print("[startup] DONE", file=sys.stderr, flush=True)
+    # CRITICAL: only mark ready if vedadb is reachable. Previously this was
+    # unconditionally True — k8s would send traffic to a service that
+    # couldn't talk to the DB. Compliance + correctness: refuse readiness
+    # until dependencies are reachable.
+    _ready = (not _ready_reasons) and True
+    print(f"[startup] {'READY' if _ready else 'NOT_READY: ' + '; '.join(_ready_reasons)}", file=sys.stderr, flush=True)
     yield
     # Shutdown phase — give in-flight requests a moment, then exit.
     print("[shutdown] draining...", file=sys.stderr, flush=True)

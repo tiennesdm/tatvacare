@@ -141,6 +141,7 @@ export const registry = {
   aiCalls: new Counter('ai_calls_total', 'AI service calls', ['endpoint', 'outcome']),
   aiCircuitState: new Gauge('ai_circuit_state', 'AI circuit breaker state (0=closed, 1=open, 2=half-open)', ['state']),
   auditWrites: new Counter('audit_writes_total', 'Audit log writes', ['kind']),
+  phiLogFailures: new Counter('phi_log_failures_total', 'PHI access log INSERT failures (table missing, db down, etc.)', ['reason']),
   vbpInUse: new Gauge('vbp_pool_in_use', 'VBP connections currently leased'),
   vbpFree: new Gauge('vbp_pool_free', 'VBP connections idle in pool'),
   vbpTotal: new Gauge('vbp_pool_total', 'VBP connections total'),
